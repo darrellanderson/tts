@@ -12,7 +12,7 @@
 
 local data = {
     -- Verbose logging (boolean).
-    enableDebugLogging = true,
+    enableDebugLogging = false,
 
     -- This token belongs to which seated player (string).
     ownerPlayerColor = nil,
@@ -63,12 +63,10 @@ function onDrop(player_color)
     resetTokenForNewOwner()
 end
 
---[[
 function onPlayerChangeColor(player_color)
     debugLog('onPlayerChangeColor ' .. player_color)
     resetTokenForNewOwner()
 end
---]]
 
 -------------------------------------------------------------------------------
 
