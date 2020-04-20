@@ -8,7 +8,7 @@
 -- turn, broadcasting to all players that player has passed.
 --
 -- Once all players have passed, the token disables turns (via Turns.enable).
--- When turns get re-enabled, each token flips back to "active".
+-- When turns get re-enabled, tokens flip back to "active" (if not already).
 
 local data = {
     -- Verbose logging (boolean).
@@ -17,19 +17,47 @@ local data = {
     -- This token belongs to which seated player (string).
     ownerPlayerColor = nil,
 
-    -- Reset when turns get enabled again?
+    -- Reset when turns get enabled again (boolean).
     needsReset = false,
 }
 
 -------------------------------------------------------------------------------
+-- OBJECT EVENT METHODS
+
+function onLoad()
+    debugLog('onLoad')
+    resetTokenForNewOwner()
+end
+
+function onDrop(player_color)
+    resetTokenForNewOwner()
+end
+
+function onPlayerChangeColor(player_color)
+    resetTokenForNewOwner()
+end
+
+function onPlayerTurnStart(player_color_start, player_color_previous)
+    debugLog('onPlayerTurnStart ' .. player_color_start)
+
+    -- Reset to active when starting a new turn after all players have passed.
+    if maybeReset() then
+        -- We reset ourselves to active, proceed with the current turn.
+        -- (NB: this also avoids a race with self.is_face_down being false
+        -- while object flip is in progress.)
+        return
+    end
+
+    -- Do not manipulate any Turns state now, let all objects process the
+    -- same turn start values and maybe pass the turn after a few frames.
+    -- Otherwise some scripts (such as "who's turn is it anyway?") might
+    -- error out if Turns are not enabled when processing this event.
+    if isMyTurn() then
+        Wait.frames(maybePassTurn, 2)
+    end
+end
 
 -------------------------------------------------------------------------------
-
---- Is this token showing "active"?
--- @return boolean
-function isActive()
-    return not self.is_face_down
-end
 
 --- Get all Active/Passed tokens on the board.
 -- @param includeSelf boolean include this object too?
@@ -46,97 +74,48 @@ function getPeers(includeSelf)
     return result
 end
 
+--- Is this token showing "active"?
+-- @return boolean true if active.
+function isActive()
+    local result = not self.is_face_down
+    debugLog('isActive -> ' .. tostring(result))
+    return result
+end
+
+--- Is any active/passed token still active?
+-- @param peers list of active/passed token objects.
+-- @return boolean true if any is active.
+function anyPeerIsActive(peers)
+    local result = false
+    for _, peer in ipairs(peers) do
+        if peer.call('isActive') then
+            result = true
+            break
+        end
+    end
+    debugLog('anyPeerActive -> ' .. tostring(result))
+    return result
+end
+
 --- Mark this object as needing to be reset when turns get enabled.
 function setNeedsReset()
     data.needsReset = true
 end
 
--------------------------------------------------------------------------------
-
-function onLoad()
-    debugLog('onLoad')
-    resetTokenForNewOwner()
-end
-
-function onDrop(player_color)
-    debugLog('onObjectDrop ' .. player_color)
-    resetTokenForNewOwner()
-end
-
-function onPlayerChangeColor(player_color)
-    debugLog('onPlayerChangeColor ' .. player_color)
-    resetTokenForNewOwner()
-end
-
--------------------------------------------------------------------------------
-
-function onPlayerTurnStart(player_color_start, player_color_previous)
-    debugLog('onPlayerTurnStart ' .. player_color_start .. ' prev=' .. player_color_previous)
-
-    if not data.ownerPlayerColor then
-        debugLog('onPlayerTurnStart: no owner player color, aborting')
-        return
-    end
-    if not Turns.enable then
-        debugLog('onPlayerTurnStart: turns not enabled, aborting')
-        return
-    end
-
-    -- If this token needs reset, flip it back to active.  This happens
-    -- the first time a turn starts after have been previously disabled.
-    -- Do this immediately regardless of which turn this is.
-    local active = isActive()
-    if data.needsReset then
-        data.needsReset = false
-        if not active then
-            self.flip()
-            active = true
-        end
-    end
-
-    -- At this point only act on behalf of the player who owns this token.
-    -- Abort if the new turn is for some other player.
-    if player_color_start ~= data.ownerPlayerColor then
-        debugLog('onPlayerTurnStart: not owner color (' .. data.ownerPlayerColor .. '), aborting')
-        return
-    end
-
-    -- Abort if still active; play and end the turn normally!
-    if active then
-        debugLog('onPlayerTurnStart: still active, aborting')
-        return
-    end
-
-    -- This object is owned by the current player, and is flipped to pass.
-    -- Tell the table we're passing
-    local player = Player[data.ownerPlayerColor]
-    broadcastToAll('Player ' .. player.steam_name .. ' passed.', data.ownerPlayerColor)
-
-    -- If at least one player is still active, move on to the next turn.
-    -- If all players have passed, disable turns.
-    local peersIncludingSelf = getPeers(true)
-    local anyActive = active
-    for _, peer in ipairs(peersIncludingSelf) do
-        if peer.call('isActive') then
-            anyActive = true
-            break
-        end
-    end
-
-    if anyActive then
-        -- Wait to change turns so the current change finishes first.
-        Wait.frames(advanceToNextTurn, 2)
-    else
-        broadcastToAll('All players have passed.', data.ownerPlayerColor)
-        Turns.enable = false
-        for _, peer in ipairs(peersIncludingSelf) do
-            peer.call('setNeedsReset')
-        end
+-- Mark peers as needing to be reset when turns get enabled.
+-- @param peers list of active/passed token objects.
+function setPeersNeedsReset(peers)
+    for _, peer in ipairs(peers) do
+        peer.call('setNeedsReset')
     end
 end
 
-function advanceToNextTurn()
-    Turns.turn_color = Turns.getNextTurnColor()
+--- Is the current turn the player who owns this token?
+-- @return boolean true if my turn.
+function isMyTurn()
+    local result = Turns.enable and Turns.turn_color == data.ownerPlayerColor
+    debugLog('isMyTurn -> ' .. tostring(result))
+    return result
 end
 
 -------------------------------------------------------------------------------
@@ -144,18 +123,73 @@ end
 --- Assign this to the closest seated player.
 -- Also tints the side of the token for a visual confirmation.
 function resetTokenForNewOwner()
-    data.ownerPlayerColor = getClosestPlayerColor(self.getPosition())
-    debugLog('resetTokenForNewOwner ' .. tostring(data.ownerPlayerColor))
+    local player = getClosestPlayer(self.getPosition())
+    local newOwnerPlayerColor = player and player.color
+    if newOwnerPlayerColor == data.ownerPlayerColor then
+        return
+    end
 
+    debugLog('resetTokenForNewOwner ' .. tostring(newOwnerPlayerColor))
+    data.ownerPlayerColor = newOwnerPlayerColor
     if data.ownerPlayerColor then
-        -- Color the sides of the token to match the owner.
         self.setColorTint(data.ownerPlayerColor)
-        rotateToMatchPlayerHand(self, data.ownerPlayerColor)
     end
 end
 
+--- Reset to active if needs reset when starting a new turn.
+-- @return boolean true if reset happened.
+function maybeReset()
+    if not Turns.enable or not data.needsReset then
+        return false
+    end
+
+    data.needsReset = false
+    if self.is_face_down then
+        self.flip()
+    end
+    return true
+end
+
+--- Pass turn if this token is set to "passed".  If all tokens are set to
+-- "passed" then disable turns altogether, requiring turns be re-enabled
+-- via some external means to proceed.
+-- @return boolean true if passed turn.
+function maybePassTurn()
+    -- Out of paranoia make sure it is still this token owner's turn.
+    -- It is possible some other script changed turns while this function
+    -- was waiting to be called, or in some cases such as hot-seat games
+    -- it appears TTS calls onPlayerTurnStart twice each turn.
+    if not isMyTurn() then
+        debugLog('maybePassTurn: not my turn, aborting')
+        return false
+    end
+
+    -- Do nothing if still active (play normally).
+    if isActive() then
+        debugLog('maybePassTurn: still active, aborting')
+        return false
+    end
+
+    -- At this point we know it is "my" turn and the token is set to "passed".
+    -- Pass this turn, or if all players have passed disable turns altogether.
+    -- (Requires external event to re-enable turns.)
+    local peers = getPeers(true)
+    if anyPeerIsActive(peers) then
+        debugLog('maybePassTurn: at least one active peer, passing turn')
+        local player = Player[data.ownerPlayerColor]
+        broadcastToAll('Player ' .. player.steam_name .. ' passed.', data.ownerPlayerColor)
+        Turns.turn_color = Turns.getNextTurnColor()
+    else
+        debugLog('maybePassTurn: no active peers, disabling turns')
+        broadcastToAll('All players have passed.', data.ownerPlayerColor)
+        setPeersNeedsReset(peers)
+        Turns.enable = false
+    end
+    return true
+end
+
 -------------------------------------------------------------------------------
--- UTILITY METHODS.  Functions below this line should not reference self.
+-- GENERIC UTILITY FUNCTIONS
 
 --- Print a statement to the console, with an on/off setting.
 -- @param string debug message.
@@ -168,9 +202,9 @@ end
 
 --- Find the seated player closest to the given position.
 -- @param position table with {x, y, z} keys.
--- @return string player color.
-function getClosestPlayerColor(position)
-    local bestPlayerColor = nil
+-- @return Player.
+function getClosestPlayer(position)
+    local bestPlayer = nil
     local bestDistanceSq = nil
     for _, playerColor in ipairs(getSeatedPlayers()) do
         local player = Player[playerColor]
@@ -182,23 +216,10 @@ function getClosestPlayerColor(position)
             local dz = position.z - handPosition.z
             local distanceSq = (dx * dx) + (dy * dy) + (dz * dz)
             if not bestDistanceSq or distanceSq < bestDistanceSq then
-                bestPlayerColor = player.color
+                bestPlayer = player
                 bestDistanceSq = distanceSq
             end
         end
     end
-    return bestPlayerColor
-end
-
---- Rotate so token text aligns with the owning player's hand.
--- Signals if token is not assigned to the expected player.
--- @param object to rotate
--- @param string playerColor to align with hand
-function rotateToMatchPlayerHand(object, playerColor)
-    -- Only rotate y, preserve flipped state.
-    local rotation = Player[playerColor].getHandTransform(1).rotation
-    rotation.x = object.getRotation().x
-    rotation.y = (rotation.y + 180) % 360
-    rotation.z = object.getRotation().z
-    object.setRotationSmooth(rotation, false, false)
+    return bestPlayer
 end
