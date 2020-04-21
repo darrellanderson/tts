@@ -50,8 +50,6 @@ function onPlayerTurnStart(player_color_start, player_color_previous)
 
     -- Do not manipulate any Turns state now, let all objects process the
     -- same turn start values and maybe pass the turn after a few frames.
-    -- Otherwise some scripts (such as "who's turn is it anyway?") might
-    -- error out if Turns are not enabled when processing this event.
     if isMyTurn() then
         Wait.frames(maybePassTurn, 2)
     end
@@ -72,6 +70,39 @@ function getPeers(includeSelf)
     end
     debugLog('getPeers: found ' .. #result .. ' peers')
     return result
+end
+
+--- Make sure each player is in the list without repeats.
+-- @return boolean true if all players have one token.
+function sanityCheckPeersWithIncludeSelf(peers)
+    local result = true
+    local colorCount = {}
+    for _, peer in ipairs(peers) do
+        local color = peer.call('getOwnerPlayerColor')
+        colorCount[color] = (colorCount[color] or 0) + 1
+    end
+    for color, count in pairs(colorCount) do
+        if (count > 1) then
+            result = false
+            local player = Player[color]
+            local name = (player and player.steam_name) or color
+            broadcastToAll('Warning: player ' .. name .. ' has multiple active/passed tokens', color)
+        end
+    end
+    for _, color in ipairs(getSeatedPlayers()) do
+        if not colorCount[color] then
+            result = false
+            local player = Player[color]
+            local name = (player and player.steam_name) or color
+            broadcastToAll('Warning: player ' .. name .. ' does not have an active/passed token', color)
+        end
+    end
+    return result
+end
+
+--- Player associated with this token.
+function getOwnerPlayerColor()
+    return data.ownerPlayerColor
 end
 
 --- Is this token showing "active"?
@@ -174,16 +205,21 @@ function maybePassTurn()
     -- Pass this turn, or if all players have passed disable turns altogether.
     -- (Requires external event to re-enable turns.)
     local peers = getPeers(true)
+    local sanityCheck = sanityCheckPeersWithIncludeSelf(peers)
     if anyPeerIsActive(peers) then
         debugLog('maybePassTurn: at least one active peer, passing turn')
         local player = Player[data.ownerPlayerColor]
         broadcastToAll('Player ' .. player.steam_name .. ' passed.', data.ownerPlayerColor)
         Turns.turn_color = Turns.getNextTurnColor()
-    else
+    elseif sanityCheck then
         debugLog('maybePassTurn: no active peers, disabling turns')
         broadcastToAll('All players have passed.', data.ownerPlayerColor)
         setPeersNeedsReset(peers)
         Turns.enable = false
+    else
+        -- If there is not one token per player still pass individual player
+        -- turns, but do not announce all players have passed nor disable turns.
+        debugLog('maybePassTurn: peers list is not one token per player, aborting')
     end
     return true
 end
