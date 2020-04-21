@@ -82,7 +82,7 @@ function sanityCheckPeersWithIncludeSelf(peers)
         colorCount[color] = (colorCount[color] or 0) + 1
     end
     for color, count in pairs(colorCount) do
-        if (count > 1) then
+        if count > 1 then
             result = false
             local player = Player[color]
             local name = (player and player.steam_name) or color
@@ -195,6 +195,10 @@ function maybePassTurn()
         return false
     end
 
+    -- Make sure everyone has exactly one active/passed token.
+    local peers = getPeers(true)
+    local sanityCheck = sanityCheckPeersWithIncludeSelf(peers)
+
     -- Do nothing if still active (play normally).
     if isActive() then
         debugLog('maybePassTurn: still active, aborting')
@@ -204,22 +208,19 @@ function maybePassTurn()
     -- At this point we know it is "my" turn and the token is set to "passed".
     -- Pass this turn, or if all players have passed disable turns altogether.
     -- (Requires external event to re-enable turns.)
-    local peers = getPeers(true)
-    local sanityCheck = sanityCheckPeersWithIncludeSelf(peers)
-    if anyPeerIsActive(peers) then
+    -- Note: if the sanity check failed then there is not one token per player.
+    -- In that case, continue to pass turns but do not consider "all" passed.
+    if anyPeerIsActive(peers) or not sanityCheck then
         debugLog('maybePassTurn: at least one active peer, passing turn')
-        local player = Player[data.ownerPlayerColor]
-        broadcastToAll('Player ' .. player.steam_name .. ' passed.', data.ownerPlayerColor)
+        local player = Player[data.ownerPlayerColor]f
+        local name = (player and player.steam_name) or data.ownerPlayerColor
+        broadcastToAll('Player ' .. name .. ' passed.', data.ownerPlayerColor)
         Turns.turn_color = Turns.getNextTurnColor()
-    elseif sanityCheck then
+    else
         debugLog('maybePassTurn: no active peers, disabling turns')
         broadcastToAll('All players have passed.', data.ownerPlayerColor)
         setPeersNeedsReset(peers)
         Turns.enable = false
-    else
-        -- If there is not one token per player still pass individual player
-        -- turns, but do not announce all players have passed nor disable turns.
-        debugLog('maybePassTurn: peers list is not one token per player, aborting')
     end
     return true
 end
