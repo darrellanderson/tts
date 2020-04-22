@@ -57,14 +57,19 @@ end
 
 -------------------------------------------------------------------------------
 
+--- Is this object an Active/Passed token?
+-- @return boolean true if peer.
+function isPeer(object)
+    return object.getName() == self.getName() and object.getDescription() == self.getDescription()
+end
+
 --- Get all Active/Passed tokens on the board.
 -- @param includeSelf boolean include this object too?
 -- @return table list of objects
 function getPeers(includeSelf)
-    local script = self.getLuaScript()
     local result = {}
     for _, object in ipairs(getAllObjects()) do
-        if object.getLuaScript() == script and (object ~= self or includeSelf) then
+        if isPeer(object) and (object ~= self or includeSelf) then
             result[#result + 1] = object
         end
     end
@@ -86,7 +91,7 @@ function sanityCheckPeersWithIncludeSelf(peers)
             result = false
             local player = Player[color]
             local name = (player and player.steam_name) or color
-            broadcastToAll('Warning: player ' .. name .. ' has multiple active/passed tokens', color)
+            printToAll('Warning: player ' .. name .. ' has multiple active/passed tokens', color)
         end
     end
     for _, color in ipairs(getSeatedPlayers()) do
@@ -94,7 +99,7 @@ function sanityCheckPeersWithIncludeSelf(peers)
             result = false
             local player = Player[color]
             local name = (player and player.steam_name) or color
-            broadcastToAll('Warning: player ' .. name .. ' does not have an active/passed token', color)
+            printToAll('Warning: player ' .. name .. ' does not have an active/passed token', color)
         end
     end
     return result
@@ -212,7 +217,7 @@ function maybePassTurn()
     -- In that case, continue to pass turns but do not consider "all" passed.
     if anyPeerIsActive(peers) or not sanityCheck then
         debugLog('maybePassTurn: at least one active peer, passing turn')
-        local player = Player[data.ownerPlayerColor]f
+        local player = Player[data.ownerPlayerColor]
         local name = (player and player.steam_name) or data.ownerPlayerColor
         broadcastToAll('Player ' .. name .. ' passed.', data.ownerPlayerColor)
         Turns.turn_color = Turns.getNextTurnColor()
