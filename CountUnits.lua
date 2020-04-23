@@ -2,6 +2,8 @@
 -- @author bonkersbgg at boardgamegeek.com
 
 local data = {
+    debugVisualize = true,
+
     -- Map from hex id (tostring(hex)) to set of guids (map from guid to true).
     -- e.g. { '<0,0,0>' = { 'guid1' = true, 'guid2' = true }}.
     unitsInHex = {},
@@ -34,6 +36,16 @@ local data = {
         ['Exotrireme'] = 'Dreatnought',
         --]]
     },
+
+    unitNamesNonFighters = {
+        ['Cruiser'] = true,
+        ['Destroyer'] = true,
+        ['Carrier'] = true,
+        ['Dreadnought'] = true,
+        ['War Sun'] = true,
+        ['Flagship'] = true,
+    },
+
     flagshipNames = {
         ['Duha Menaimon'] = true,
         ['Arc Secundus'] = true,
@@ -67,13 +79,40 @@ local data = {
         ['f38182'] = 'delta',
 
         -- Ghost flagship.
-        -- (guid will change with player color, no?  Find this one by name.)
+        -- Hmm, is this static?  Find it by name rather than guid.
 
         -- Ghost extra wormhole tokens.
         ['0d2f86'] = 'alpha',
         ['cba3a7'] = 'beta',
-        
     },
+
+    -- Ghosts flagship contains a delta wormhole.
+    wormholeFlagship = { name = 'Hil Colish', wormhole = 'delta' },
+
+    -- Xxcha flagship can fire space cannon into adjacent systems.
+    pdsFlagship = { name = 'Loncara Ssodu', pdsCount = 3 },
+
+    winnuFlagship = { name = 'Salai Sai Corian' },
+
+    pds2Card = { name = 'PDS II' },
+    antimassDeflectorCard = { name = 'Antimass Deflector' },
+
+    -- Map from player color name to value.
+    playerColors = {
+        White = {1, 1, 1},
+        Brown = {0.443, 0.231, 0.09},
+        Red = {0.856, 0.1, 0.094},
+        Orange = {0.956, 0.392, 0.113},
+        Yellow = {0.905, 0.898, 0.172},
+        Green = {0.192, 0.701, 0.168},
+        Teal = {0.129, 0.694, 0.607},
+        Blue = {0.118, 0.53, 1},
+        Purple = {0.627, 0.125, 0.941},
+        Pink = {0.96, 0.439, 0.807},
+        Grey = {0.5, 0.5, 0.5},
+        Black = {0.25, 0.25, 0.25}
+    },
+
 }
 
 -- Function collections.
@@ -204,12 +243,12 @@ end
 -- Useful for verifying hex grid here matches the TTS grid.
 -- @param hex
 -- @return vectors list entry
-function getHexVectorLines(hex)
+function getHexVectorLines(hex, overrideValues)
     local corners = HexGrid.polygon_corners(ti4HexGridLayout, hex)
     local line = {
         points = {},
-        color = {1, 1, 1},
-        thickness = 0.1,
+        color = (overrideValues and overrideValues.color) or {1, 1, 1},
+        thickness = (overrideValues and overrideValues.thickness) or 0.1,
         rotation = {0, 0, 0},
         loop = true,
         square = false,
@@ -226,51 +265,56 @@ end
 -- @param hex
 -- @return list of adjacent-via-wormhole hexes.
 function getWormholeNeighborHexes(hex)
-    local wormholes = {}
-
-    -- Find wormholes in the hex.
-    local point2d = HexGrid.hex_to_pixel(ti4HexGridLayout, hex)
-    local pos = { x = point2d.x, y = 1, z = point2d.y }
-    local objects = Util.getObjectsAtPosition(pos, 10, 'Generic')
-    for _, obj in ipairs(objects) do
-        local wormhole = data.wormholeObjects[obj.getGUID()]
-        if wormhole then
-            wormholes[wormhole] = true
+    -- Build a map from objects to wormholes in them.
+    local wormholeObjects = {}
+    for k, v in pairs(data.wormholeObjects) do
+        wormholeObjects[k] = v
+    end
+    for _, obj in ipairs(getAllObjects()) do
+        if obj.getName() == data.wormholeFlagship.name and Util.isInTilesZone(obj.getPosition()) then
+            obj.highlightOn({0,1,0}, 10)
+            wormholeObjects[obj.getGUID()] = data.wormholeFlagship.wormhole
+            break
         end
     end
 
-    -- Is the Cruess flagship in the hex?  It is a delta wormhole!
-    local hexString = tostring(hex)
-    local unitsSet = data.unitsInHex[hexString] or {}
-    for guid, _ in pairs(unitsSet) do
-        local unit = getObjectFromGUID(guid)
-        if unit and unit.getName() == 'Hil Colish' then
-            wormholes['delta'] = true
+    -- Get all wormholes in the given hex.
+    local wormholesInHex = {}
+    for guid, wormhole in pairs(wormholeObjects) do
+        local obj = getObjectFromGUID(guid)
+        local objHex = obj and getHex(obj.getPosition())
+        if objHex == hex then
+            wormholesInHex[wormhole] = true
         end
     end
 
-    -- Get tiles with matching wormholes.
+    -- Get hexes with matching wormholes.
     local result = {}
-    for guid, wormhole in pairs(data.wormholeObjects) do
-        if wormsholes[wormhole] then
+    for guid, wormhole in pairs(wormholeObjects) do
+        if wormholesInHex[wormhole] then
             local obj = getObjectFromGUID(guid)
-            if obj then
-                table.insert(result, getHex(obj.getPosition()))
+            local objHex = obj and getHex(obj.getPosition())
+            if objHex ~= hex then
+                table.insert(result, objHex)
             end
         end
     end
 
-    -- If a delta wormhole, add the system with the ghost flagship.
-    if wormholes['delta'] then
-        for _, obj in ipairs(getAllObjects()) do
-            if obj.getName() == 'Hil Colish' then
-                table.insert(result, getHex(obj.getPosition()))
-                break
-            end
-        end
-    end
-
+    result = getUniqueHexes(result)
     Util.debugLog('getWormholeNeighborHexes: |result|=' .. tostring(#result))
+    return result
+end
+
+function getUniqueHexes(hexes)
+    local result = {}
+    local seen = {}
+    for _, hex in ipairs(hexes) do
+        local hexString = tostring(hex)
+        if not seen[hexString] then
+            seen[hexString] = true
+            table.insert(result, hex)
+        end
+    end
     return result
 end
 
@@ -280,23 +324,21 @@ function Util.debugLog(message)
     print(message)
 end
 
-function Util.printTable(table, indent)
+function Util.printTable(name, table, indent)
     if not indent then
         indent = ''
     end
-    if not table then
-        print(indent .. 'nil')
-        return
-    end
-    for k, v in pairs(table) do
-        if type(v) ~= 'table' then
-            print(indent .. tostring(k) .. ' = ' .. tostring(v))
-        else
-            print(indent .. tostring(k) .. ' = {')
-            Util.printTable(v, '  ' .. indent)
-            print(indent .. '}')
+    print(indent .. name .. ' = {')
+    if table then
+        for k, v in pairs(table) do
+            if type(v) ~= 'table' then
+                print(indent .. tostring(k) .. ' = ' .. tostring(v))
+            else
+                Util.printTable(tostring(k), v, '  ' .. indent)
+            end
         end
     end
+    print(indent .. '}')
 end
 
 --- Find the seated player closest to the given position.
@@ -327,23 +369,9 @@ end
 -- @param color table with r, g, b values.
 -- @return string PlayerColor.
 function Util.colorToPlayerColor(color)
-    local colors = {
-        White = {1, 1, 1},
-        Brown = {0.443, 0.231, 0.09},
-        Red = {0.856, 0.1, 0.094},
-        Orange = {0.956, 0.392, 0.113},
-        Yellow = {0.905, 0.898, 0.172},
-        Green = {0.192, 0.701, 0.168},
-        Teal = {0.129, 0.694, 0.607},
-        Blue = {0.118, 0.53, 1},
-        Purple = {0.627, 0.125, 0.941},
-        Pink = {0.96, 0.439, 0.807},
-        Grey = {0.5, 0.5, 0.5},
-        Black = {0.25, 0.25, 0.25}
-    }
     local bestColor = nil
     local bestDistanceSq = nil
-    for playerColorName, playerColor in pairs(colors) do
+    for playerColorName, playerColor in pairs(data.playerColors) do
         local dr = playerColor[1] - (color.r or color[1])
         local dg = playerColor[2] - (color.g or color[2])
         local db = playerColor[3] - (color.b or color[3])
@@ -356,34 +384,28 @@ function Util.colorToPlayerColor(color)
     return bestColor
 end
 
-function Util.hasCard(playerColor, cardName)
-    local result = false
-    for _, object in ipairs(getAllObjects()) do
-        if object.getName() == cardName and Util.getClosestPlayer(object.getPosition()) == playerColor then
-            result = true
-            break
+function Util.findObjectsByName(names)
+    local result = {}
+    local namesSet = {}
+    for _, name in ipairs(names) do
+        namesSet[name] = true
+    end
+    for _, obj in ipairs(getAllObjects()) do
+        local name = obj.getName()
+        if namesSet[name] then
+            local objectsByName = result[name]
+            if not objectsByName then
+                objectsByName = {}
+                result[name] = objectsByName
+            end
+            table.insert(objectsByName, obj)
         end
     end
-    Util.debugLog('hasCard ' .. playerColor .. ' "' .. cardName .. '" -> ' .. tostring(result))
     return result
 end
 
-function Util.getObjectsAtPosition(pos, SearchDiameter, Tag)
-    local objList = Physics.cast({
-        origin=pos, direction={0,1,0}, type=3, size={0.1,SearchDiameter,0.1},
-        max_distance=0, debug=false
-    })
-    local foundItems = {}
-    for i, obj in ipairs(objList) do
-        if Tag == nil then
-            table.insert(foundItems, obj.hit_object)
-        else
-            if obj.hit_object.tag == Tag then
-                table.insert(foundItems, obj.hit_object)
-            end
-        end
-    end
-    return foundItems
+function Util.isInTilesZone(position)
+    return position.x >= -28 and position.x <= 28 and position.z >= -28 and position.z <= 28
 end
 
 -------------------------------------------------------------------------------
@@ -413,17 +435,13 @@ function parseUnit(object)
     local unitColor = string.sub(name, 1, startPos - 1)
     local unitName = string.sub(name, endPos + 1)
 
-    -- Abort if not a unit name.
-    if not data.unitNames[unitName] then
+    -- Abort if not a player color.
+    if not data.playerColors[unitColor] then
         return nil, nil
     end
 
-    -- Abort if not a player color.
-    local seated = {}
-    for _, playerColor in ipairs(getSeatedPlayers()) do
-        seated[playerColor] = true
-    end
-    if not seated[unitColor] then
+    -- Abort if not a unit name.
+    if not data.unitNames[unitName] then
         return nil, nil
     end
 
@@ -466,9 +484,11 @@ function getUnitColorsInHex(hex)
 end
 
 --- Get units from a hex.
+-- Return the unit objects themselves rather than simple quantities in case
+-- further inspection is necessary.
 -- @param playerColor string.
 -- @param hex.
--- @return table from unit name to quantity.
+-- @return table from unit name to list of unit objects.
 function getUnitsInHex(playerColor, hex)
     local result = {}
     local hexString = tostring(hex)
@@ -482,7 +502,12 @@ function getUnitsInHex(playerColor, hex)
 
             -- Select objects with correct color (and verify still there!).
             if unitColor == playerColor and unitHex == hex then
-                result[unitName] = (result[unitName] or 0) + 1
+                local unitList = result[unitName]
+                if not unitList then
+                    unitList = {}
+                    result[unitName] = unitList
+                end
+                table.insert(unitList, object)
             end
         end
     end
@@ -491,9 +516,16 @@ end
 
 function getUnitsInHexes(playerColor, hexes)
     result = {}
-    for _, hex in ipairs(hexes) do
-        for unitName, quantity in getUnitsInHex(hex) do
-            result[unitName] = (result[unitName] or 0) + quantity
+    for _, hex in ipairs(getUniqueHexes(hexes)) do
+        for unitName, objects in pairs(getUnitsInHex(playerColor, hex)) do
+            local unitList = result[unitName]
+            if not unitList then
+                unitList = {}
+                result[unitName] = unitList
+            end
+            for _, object in ipairs(objects) do
+                table.insert(unitList, object)
+            end
         end
     end
     return result
@@ -510,7 +542,7 @@ function defender()
 
     if not data.lastActivatedHex then
         Util.debugLog('defender -> nil (no last activated hex)')
-        return nil
+        return
     end
 
     -- There cannot be more than 2 unit colors in a space, if that happens
@@ -518,7 +550,7 @@ function defender()
     -- make sure one is the attacker and return the other one.  If only one,
     -- it is the defender if not the attacker (e.g., activate a system to fire
     -- PDS2 from an adjacent system).
-    local unitColors = getUnitColors(data.lastActivatedHex)
+    local unitColors = getUnitColorsInHex(data.lastActivatedHex)
     local attackerColor = attacker()
     local sawAttacker = false
     if #unitColors <= 2 then
@@ -532,19 +564,156 @@ function defender()
     end
     if #unitColors == 2 and not sawAttacker then
         Util.debugLog('defender -> nil (two colors, but neither is attacker)')
-        return nil
+        return
     end
 
     Util.debugLog('defender -> ' .. tostring(result))
     return result
 end
 
-function hasPDS2(playerColor)
-    return Util.hasCard(playerColor, 'PDS II')
+-------------------------------------------------------------------------------
+
+function getEnemyColor(playerColor)
+    -- There should always be an attacker, the player who activated the system.
+    local attackerColor = attacker()
+    if not attackerColor then
+        Util.debugLog('getEnemyColor: no attacker, aborting')
+        return
+    end
+
+    -- There is not necessarily a defender if no other players in system.
+    local defenderColor = defender()
+    Util.debugLog('attacker ' .. tostring(attackerColor) .. ', defender ' .. tostring(defenderColor))
+
+    -- The enemy color is the defender if we are the attacker, or the attacker
+    -- if we are not the attacker (remember there may not be a defender).
+    if playerColor == attackerColor then
+        -- May be nil!
+        return defenderColor
+    else
+        return attackerColor
+    end
 end
 
-function hasAntimassDeflector(playerColor)
-    return Util.hasCard(playerColor, 'Antimass Deflector')
+function getCombatSheetCards(playerColor, enemyColor)
+    local result = {}
+    local objects = Util.findObjectsByName({
+        data.antimassDeflectorCard.name,
+        data.pds2Card.name
+    })
+
+    local amdCards = objects[data.antimassDeflectorCard.name]
+    if amdCards then
+        for _, obj in ipairs(amdCards) do
+            if enemyColor == Util.getClosestPlayer(obj.getPosition()).color then
+                result[data.antimassDeflectorCard.name] = obj
+            end
+        end
+    end
+
+    local pds2Cards = objects[data.pds2Card.name]
+    if pds2Cards then
+        for _, obj in ipairs(pds2Cards) do
+            if playerColor == Util.getClosestPlayer(obj.getPosition()).color then
+                result[data.pds2Card.name] = obj
+            end
+        end
+    end
+
+    return result
+end
+
+function getCombatSheetValues(playerColor, enemyColor, cards)
+    local hex = data.lastActivatedHex
+    if not hex then
+        Util.debugLog('getCombatSheetValues: no hex, aborting')
+        return
+    end
+
+    local neighbors = getNeighborHexes(hex)
+    local wormholeNeighbors = getWormholeNeighborHexes(hex)
+    local allNeighbors = {}
+
+    -- Optionally show the activated system in red, local neighbors green,
+    -- and wormhole-adjacent in blue.
+    if data.debugVisualize then
+        local vectors = {}
+        for _, neighbor in ipairs(wormholeNeighbors) do
+            table.insert(vectors, getHexVectorLines(neighbor, {color={0,0,1,0.7},thickness=0.33}))
+        end
+        for _, neighbor in ipairs(neighbors) do
+            table.insert(vectors, getHexVectorLines(neighbor, {color={0,1,0,0.7},thickness=0.66}))
+        end
+        table.insert(vectors, getHexVectorLines(hex, {color={1,0,0,0.7},thickness=1}))
+        Global.setVectorLines(vectors)
+    end
+
+    for _, neighborHex in ipairs(neighbors) do
+        table.insert(allNeighbors, neighborHex)
+    end
+    for _, neighborHex in ipairs(wormholeNeighbors) do
+        table.insert(allNeighbors, neighborHex)
+    end
+    allNeighbors = getUniqueHexes(allNeighbors)
+    print('xxx |neighbors|=' .. tostring(#allNeighbors))
+
+    local myLocalUnits = getUnitsInHex(playerColor, hex)
+    local myNeighborUnits = getUnitsInHexes(playerColor, allNeighbors)
+
+    -- Get units in system.
+    local result = {}
+    for unitName, unitObjects in pairs(myLocalUnits) do
+        result[unitName] = #unitObjects
+    end
+
+    -- If PDS2, get pds in adjacent systems.
+    Util.printTable('xxx neighbor units', myNeighborUnits)
+    if cards[data.pds2Card.name] and myNeighborUnits['PDS'] then
+        result['PDS'] = (result['PDS'] or 0) + #myNeighborUnits['PDS']
+    end
+
+    -- If Xxcha flagship, count as extra pds.
+    local myLocalFlagships = myLocalUnits['Flagship']
+    local myNeighborFlagships = myNeighborUnits['Flagship']
+    local allFlagships = {}
+    if myLocalFlagships then
+        for _, obj in ipairs(myLocalFlagships) do
+            table.insert(allFlagships, obj)
+        end
+    end
+    if myNeighborFlagships then
+        for _, obj in ipairs(myNeighborFlagships) do
+            table.insert(allFlagships, obj)
+        end
+    end
+    for _, obj in ipairs(allFlagships) do
+        if obj.getName() == data.pdsFlagship.name then
+            result['PDS'] = (result['PDS'] or 0) + data.pdsFlagship.pdsCount
+        end
+    end
+
+    -- If Winnu flagship, value is number of non-fighter enemies.
+    local winnuFlagship = false
+    if myLocalFlagships then
+        for _, obj in ipairs(myLocalFlagships) do
+            if obj.getName() == data.winnuFlagship.name then
+                winnuFlagship = true
+                break
+            end
+        end
+    end
+    if winnuFlagship then
+        local enemyLocalUnits = getUnitsInHex(enemyColor, hex)
+        local count = 0
+        for unitName, unitObjects in pairs(enemyLocalUnits) do
+            if data.unitNamesNonFighters[unitName] then
+                count = count + #unitObjects
+            end
+        end
+        result['Flagship'] = count
+    end
+
+    return result
 end
 
 -------------------------------------------------------------------------------
@@ -567,6 +736,12 @@ function onObjectPickUp(player_color, picked_up_object)
 end
 
 function onObjectDrop(player_color, dropped_object)
+    if player_color == Turns.turn_color and string.find(dropped_object.getName(), ' Command Token') and Util.isInTilesZone(dropped_object.getPosition()) then
+        Util.debugLog('onObjectDrop: activated by ' .. player_color)
+        data.lastActivatedHex = getHex(dropped_object.getPosition())
+        data.lastActivatedPlayerColor = player_color
+    end
+
     if not isTracked(dropped_object) then
         return
     end
@@ -591,19 +766,11 @@ function onDrop(player_color)
     local neighbors = getNeighborHexes(hex)
     local wormholeNeighbors = getWormholeNeighborHexes(hex)
 
-    local vectors = { getHexVectorLines(hex) }
-    vectors[1].color = {1, 0, 0, 0.5}
-    vectors[1].thickness = 2
-    for _, neighbor in ipairs(neighbors) do
-        table.insert(vectors, getHexVectorLines(neighbor))
-        vectors[#vectors].color = {1, 1, 1, 0.5}
-    end
-    for _, neighbor in ipairs(wormholeNeighbors) do
-        table.insert(vectors, getHexVectorLines(neighbor))
-        vectors[#vectors].color = {0, 0, 1, 0.5}
-    end
-    Global.setVectorLines(vectors)
+    Util.printTable('unit colors', getUnitColorsInHex(hex))
 
-    print('xxx unit colors')
-    Util.printTable(getUnitColorsInHex(hex))
+    local enemyColor = getEnemyColor(player_color)
+    local cards = getCombatSheetCards(player_color, enemy_color)
+    Util.printTable('cards', cards)
+    local units = getCombatSheetValues(player_color, enemy_color, cards)
+    Util.printTable('units', units)
 end
