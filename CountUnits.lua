@@ -55,14 +55,32 @@ local data = {
 
         -- Name reserved for testing.
         ['MyTestHexThingy'] = true,
-    }
+    },
+
+    wormholeObjects = {
+        -- Planet tiles.
+        ['c56a8a'] = 'delta',
+        ['71e1bf'] = 'beta',
+        ['f11ef5'] = 'alpha',
+        ['0378a4'] = 'alpha',
+        ['ccd7ac'] = 'beta',
+        ['f38182'] = 'delta',
+
+        -- Ghost flagship.
+
+
+        -- Ghost extra wormhole tokens.
+    },
 }
+
+-- Function collections.
+local HexGrid = {}
+local Util = {}
 
 -------------------------------------------------------------------------------
 -- Hex grid math from redblobgames
 -- https://www.redblobgames.com/grids/hexagons/implementation.html
 
-local HexGrid = {}
 HexGrid.hex_metatable = {
     __tostring = function(hex)
         return '<' .. hex.q .. ',' .. hex.r .. ',' .. hex.s .. '>'
@@ -166,8 +184,8 @@ local ti4HexGridLayout = HexGrid.Layout(HexGrid.orientation_flat, HexGrid.Point(
 -- @param position {x, y, z} table.
 -- @return hex, neighbors list
 function getHex(position)
-    local p = HexGrid.Point(position.x, position.z)
-    local hex = HexGrid.pixel_to_hex(ti4HexGridLayout, p)
+    local point2d = HexGrid.Point(position.x, position.z)
+    local hex = HexGrid.pixel_to_hex(ti4HexGridLayout, point2d)
     hex = HexGrid.hex_round(hex)
     return hex
 end
@@ -194,15 +212,66 @@ function getHexVectorLines(hex)
         square = false,
     }
     y = 1
-    for i, point in ipairs(corners) do
-        table.insert(line.points, {point.x, y, point.y})
+    for i, point2d in ipairs(corners) do
+        table.insert(line.points, {point2d.x, y, point2d.y})
     end
     return line
 end
 
--------------------------------------------------------------------------------
+--- If the hex contains a wormhole or the ghost flagship, it is also
+-- adjacent to peer wormholes.
+-- @param hex
+-- @return list of adjacent-via-wormhole hexes.
+function getWormholeNeighborHexes(hex)
+    local wormholes = {}
 
-local Util = {}
+    -- Find wormholes in the hex.
+    local point2d = HexGrid.hex_to_pixel(ti4HexGridLayout, hex)
+    local pos = { x = point2d.x, y = 1, z = point2d.y }
+    local objects = Util.getObjectsAtPosition(pos, 10, 'Generic')
+    for _, obj in ipairs(objects) do
+        local wormhole = data.wormholeObjects[obj.getGUID()]
+        if wormhole then
+            wormholes[wormhole] = true
+        end
+    end
+
+    -- Is the Cruess flagship in the hex?  It is a delta wormhole!
+    local hexString = tostring(hex)
+    local unitsSet = data.unitsInHex[hexString] or {}
+    for guid, _ in pairs(unitsSet) do
+        local unit = getObjectFromGUID(guid)
+        if unit and unit.getName() == 'Hil Colish' then
+            wormholes['delta'] = true
+        end
+    end
+
+    -- Get tiles with matching wormholes.
+    local result = {}
+    for guid, wormhole in pairs(data.wormholeObjects) do
+        if wormsholes[wormhole] then
+            local obj = getObjectFromGUID(guid)
+            if obj then
+                table.insert(result, getHex(obj.getPosition()))
+            end
+        end
+    end
+
+    -- If a delta wormhole, add the system with the ghost flagship.
+    if wormholes['delta'] then
+        for _, obj in ipairs(getAllObjects()) do
+            if obj.getName() == 'Hil Colish' then
+                table.insert(result, getHex(obj.getPosition()))
+                break
+            end
+        end
+    end
+
+    Util.debugLog('getWormholeNeighborHexes: |result|=' .. tostring(#result))
+    return result
+end
+
+-------------------------------------------------------------------------------
 
 function Util.debugLog(message)
     print(message)
@@ -296,6 +365,24 @@ function Util.hasCard(playerColor, cardName)
     return result
 end
 
+function Util.getObjectsAtPosition(pos, SearchDiameter, Tag)
+    local objList = Physics.cast({
+        origin=pos, direction={0,1,0}, type=3, size={0.1,SearchDiameter,0.1},
+        max_distance=0, debug=false
+    })
+    local foundItems = {}
+    for i, obj in ipairs(objList) do
+        if Tag == nil then
+            table.insert(foundItems, obj.hit_object)
+        else
+            if obj.hit_object.tag == Tag then
+                table.insert(foundItems, obj.hit_object)
+            end
+        end
+    end
+    return foundItems
+end
+
 -------------------------------------------------------------------------------
 
 --- Get the color and unit name of an object.
@@ -353,50 +440,57 @@ end
 --- Get the set of player colors with units in a hex.
 -- @param hex.
 -- @return list of player color strings.
-function getUnitColors(hex)
+function getUnitColorsInHex(hex)
     local hexString = tostring(hex)
     local result = {}
     local seen = {}
-    local unitsSet = data.unitsInHex[hexString]
-
-    if not unitsSet then
-        return result
-    end
+    local unitsSet = data.unitsInHex[hexString] or {}
 
     for guid, _ in pairs(unitsSet) do
         local object = getObjectFromGUID(guid)
-        local unitColor, unitName = parseUnit(object)
-        local unitHex = getHex(object.getPosition())
+        if object then
+            local unitColor, unitName = parseUnit(object)
+            local unitHex = getHex(object.getPosition())
 
-        -- Verify still there!
-        if unitHex == hex and not seen[unitColor] then
-            seen[unitColor] = true
-            table.insert(result, unitColor)
+            -- Verify still there!
+            if unitHex == hex and not seen[unitColor] then
+                seen[unitColor] = true
+                table.insert(result, unitColor)
+            end
         end
     end
     return result
 end
 
---- Get units in a hex.
+--- Get units from a hex.
 -- @param playerColor string.
 -- @param hex.
 -- @return table from unit name to quantity.
-function getUnits(playerColor, hex)
-    local hexString = tostring(hex)
+function getUnitsInHex(playerColor, hex)
     local result = {}
-    local unitsSet = data.unitsInHex[hexString]
+    local hexString = tostring(hex)
+    local unitsSet = data.unitsInHex[hexString] or {}
 
-    if not unitsSet then
-        return result
-    end
     for guid, _ in pairs(unitsSet) do
         local object = getObjectFromGUID(guid)
-        local unitColor, unitName = parseUnit(object)
-        local unitHex = getHex(object.getPosition())
+        if object then
+            local unitColor, unitName = parseUnit(object)
+            local unitHex = getHex(object.getPosition())
 
-        -- Select objects with correct color (and verify still there!).
-        if unitColor == playerColor and unitHex == hex then
-            result[unitName] = (result[unitName] or 0) + 1
+            -- Select objects with correct color (and verify still there!).
+            if unitColor == playerColor and unitHex == hex then
+                result[unitName] = (result[unitName] or 0) + 1
+            end
+        end
+    end
+    return result
+end
+
+function getUnitsInHexes(playerColor, hexes)
+    result = {}
+    for _, hex in ipairs(hexes) do
+        for unitName, quantity in getUnitsInHex(hex) do
+            result[unitName] = (result[unitName] or 0) + quantity
         end
     end
     return result
@@ -492,8 +586,7 @@ end
 function onDrop(player_color)
     local hex = getHex(self.getPosition())
     local neighbors = getNeighborHexes(hex)
-    print(hex)
-    print(tostring(hex))
+    local wormholeNeighbors = getWormholeNeighborHexes(hex)
 
     local vectors = { getHexVectorLines(hex) }
     vectors[1].color = {1, 0, 0, 0.5}
@@ -502,8 +595,12 @@ function onDrop(player_color)
         table.insert(vectors, getHexVectorLines(neighbor))
         vectors[#vectors].color = {1, 1, 1, 0.5}
     end
+    for _, neighbor in ipairs(wormholeNeighbors) do
+        table.insert(vectors, getHexVectorLines(neighbor))
+        vectors[#vectors].color = {0, 0, 1, 0.5}
+    end
     Global.setVectorLines(vectors)
 
     print('xxx unit colors')
-    Util.printTable(getUnitColors(hex))
+    Util.printTable(getUnitColorsInHex(hex))
 end
