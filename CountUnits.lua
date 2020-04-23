@@ -3,12 +3,14 @@
 
 local data = {
     debugVisualize = true,
+    debugLogEnabled = false,
+    maybePrintToTable = true,
 
     -- Map from hex id (tostring(hex)) to set of guids (map from guid to true).
     -- e.g. { '<0,0,0>' = { 'guid1' = true, 'guid2' = true }}.
     unitsInHex = {},
 
-    -- The last hex where a command token dropped.
+    -- The last hex where the active player dropped a command token.
     lastActivatedHex = nil,
     lastActivatedPlayerColor = nil,
 
@@ -96,6 +98,7 @@ local data = {
 
     pds2Card = { name = 'PDS II' },
     antimassDeflectorCard = { name = 'Antimass Deflector' },
+    plasmaScoringCard = { name = 'Plasma Scoring' },
 
     -- Map from player color name to value.
     playerColors = {
@@ -232,6 +235,11 @@ function getHex(position)
     return hex
 end
 
+function getHexPosition(hex)
+    local point2d = HexGrid.hex_to_pixel(ti4HexGridLayout, hex)
+    return { x = point2d.x, y = 1, z = point2d.y }
+end
+
 --- Get neighboring hexes.
 -- @param hex
 -- @return neighbor hexes list
@@ -305,6 +313,9 @@ function getWormholeNeighborHexes(hex)
     return result
 end
 
+--- Prune a list of hexes to unique entries.
+-- @param hexes list of hexes.
+-- @return list of hexes.
 function getUniqueHexes(hexes)
     local result = {}
     local seen = {}
@@ -321,10 +332,15 @@ end
 -------------------------------------------------------------------------------
 
 function Util.debugLog(message)
-    print(message)
+    if data.debugLogEnabled then
+        print(message)
+    end
 end
 
-function Util.printTable(name, table, indent)
+function Util.debugLogTable(name, table, indent)
+    if not data.debugLogEnabled then
+        return
+    end
     if not indent then
         indent = ''
     end
@@ -334,7 +350,7 @@ function Util.printTable(name, table, indent)
             if type(v) ~= 'table' then
                 print(indent .. tostring(k) .. ' = ' .. tostring(v))
             else
-                Util.printTable(tostring(k), v, '  ' .. indent)
+                Util.debugLogTable(tostring(k), v, '  ' .. indent)
             end
         end
     end
@@ -384,6 +400,10 @@ function Util.colorToPlayerColor(color)
     return bestColor
 end
 
+--- Search for a set of objects.
+-- Use this when scanning for multiple objects to reduce the number of passes.
+-- @param names list of object names.
+-- @return table from object name to list of objects with that name.
 function Util.findObjectsByName(names)
     local result = {}
     local namesSet = {}
@@ -404,8 +424,39 @@ function Util.findObjectsByName(names)
     return result
 end
 
+--- Is this position in the map area?
+-- @return boolean true if in map area.
 function Util.isInTilesZone(position)
     return position.x >= -28 and position.x <= 28 and position.z >= -28 and position.z <= 28
+end
+
+--- Does the given player have the card object face up near them?
+-- @param playerColor string.
+-- @param cardObject object.
+-- @return boolean true of player has card.
+function Util.playerHasCard(playerColor, cardObject)
+    -- Reject if face down.
+    if cardObject.is_face_down then
+        return false
+    end
+
+    -- Reject if in hand (this is how multiroller does it, is there a better way?)
+    if cardObject.getPosition().y >= 2.5 then
+        return false
+    end
+
+    -- Reject if closer to another player.
+    if not Util.getClosestPlayer(cardObject.getPosition()).color then
+        return false
+    end
+
+    return true
+end
+
+function Util.maybePrintToTable(message, color)
+    if data.maybePrintToTable then
+        printToAll('Combat Sheet Filler: ' .. message, color)
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -455,6 +506,7 @@ function isTracked(object)
         return true
     end
 
+    -- Do we want to track any objects other than units?
     return false
 end
 
@@ -514,6 +566,10 @@ function getUnitsInHex(playerColor, hex)
     return result
 end
 
+--- Get units from a list of hexes.
+-- @param playerColor string.
+-- @param hexes list of hex objects.
+-- @return table from unit name to list of unit objects.
 function getUnitsInHexes(playerColor, hexes)
     result = {}
     for _, hex in ipairs(getUniqueHexes(hexes)) do
@@ -531,12 +587,16 @@ function getUnitsInHexes(playerColor, hexes)
     return result
 end
 
+--- Who is attacking the last activated system?
+-- @return string player color.
 function attacker()
     local result = data.lastActivatedPlayerColor
     Util.debugLog('attacker -> ' .. tostring(result))
     return result
 end
 
+--- Who is defending the last activated system?
+-- @return string player color, or nil if no explicit defender.
 function defender()
     local result = nil
 
@@ -554,11 +614,11 @@ function defender()
     local attackerColor = attacker()
     local sawAttacker = false
     if #unitColors <= 2 then
-        for _, playerColor in ipairs(unitColors) do
-            if playerColor == attackerColor then
+        for _, unitColor in ipairs(unitColors) do
+            if unitColor == attackerColor then
                 sawAttacker = true
             else
-                result = playerColor
+                result = unitColor
             end
         end
     end
@@ -573,6 +633,9 @@ end
 
 -------------------------------------------------------------------------------
 
+--- From the given player's perspective, who is the enemy?
+-- @param playerColor string.
+-- @return enemyColor string, or nil if no explicit enemy.
 function getEnemyColor(playerColor)
     -- There should always be an attacker, the player who activated the system.
     local attackerColor = attacker()
@@ -582,7 +645,7 @@ function getEnemyColor(playerColor)
     end
 
     -- There is not necessarily a defender if no other players in system.
-    local defenderColor = defender()
+    local defenderColor = defender(hex)
     Util.debugLog('attacker ' .. tostring(attackerColor) .. ', defender ' .. tostring(defenderColor))
 
     -- The enemy color is the defender if we are the attacker, or the attacker
@@ -595,18 +658,25 @@ function getEnemyColor(playerColor)
     end
 end
 
+--- Get cards relevant to the given player/enemy pair.
+-- E.g., does the player have PDS2, does the enemy have AMD?
+-- @param playerColor string.
+-- @param enemyColor string.
+-- @return table from card name to card object.
 function getCombatSheetCards(playerColor, enemyColor)
     local result = {}
     local objects = Util.findObjectsByName({
         data.antimassDeflectorCard.name,
-        data.pds2Card.name
+        data.pds2Card.name,
+        data.plasmaScoringCard.name,
     })
 
     local amdCards = objects[data.antimassDeflectorCard.name]
     if amdCards then
         for _, obj in ipairs(amdCards) do
-            if enemyColor == Util.getClosestPlayer(obj.getPosition()).color then
+            if Util.playerHasCard(enemyColor, obj) then
                 result[data.antimassDeflectorCard.name] = obj
+                break
             end
         end
     end
@@ -614,8 +684,19 @@ function getCombatSheetCards(playerColor, enemyColor)
     local pds2Cards = objects[data.pds2Card.name]
     if pds2Cards then
         for _, obj in ipairs(pds2Cards) do
-            if playerColor == Util.getClosestPlayer(obj.getPosition()).color then
+            if Util.playerHasCard(playerColor, obj) then
                 result[data.pds2Card.name] = obj
+                break
+            end
+        end
+    end
+
+    local plasmaScoringCards = objects[data.plasmaScoringCard.name]
+    if plasmaScoringCards then
+        for _, obj in ipairs(plasmaScoringCards) do
+            if Util.playerHasCard(playerColor, obj) then
+                result[data.plasmaScoringCard.name] = obj
+                break
             end
         end
     end
@@ -623,11 +704,22 @@ function getCombatSheetCards(playerColor, enemyColor)
     return result
 end
 
+--- Get the number of units affecting the activated system.
+-- @param playerColor string.
+-- @param enemyColor string (relevant to Winnu flagship).
+-- @param cards map of relevant card names to card objects.
+-- @return table from unit name to quantity.
 function getCombatSheetValues(playerColor, enemyColor, cards)
-    local hex = data.lastActivatedHex
+    hex = data.lastActivatedHex
     if not hex then
         Util.debugLog('getCombatSheetValues: no hex, aborting')
         return
+    end
+
+    Util.maybePrintToTable('filling for ' .. (playerColor or '?') .. ' attacking ' .. (enemyColor or '?'), playerColor)
+    if data.maybePrintToTable then
+        local pos = getHexPosition(hex)
+        Player[playerColor].pingTable(pos)
     end
 
     local neighbors = getNeighborHexes(hex)
@@ -655,21 +747,30 @@ function getCombatSheetValues(playerColor, enemyColor, cards)
         table.insert(allNeighbors, neighborHex)
     end
     allNeighbors = getUniqueHexes(allNeighbors)
-    print('xxx |neighbors|=' .. tostring(#allNeighbors))
 
     local myLocalUnits = getUnitsInHex(playerColor, hex)
     local myNeighborUnits = getUnitsInHexes(playerColor, allNeighbors)
 
     -- Get units in system.
     local result = {}
+    local msg = ''
     for unitName, unitObjects in pairs(myLocalUnits) do
         result[unitName] = #unitObjects
+        if msg ~= '' then
+            msg = msg .. ', '
+        end
+        msg = msg .. result[unitName] .. ' ' .. unitName
+    end
+    if msg ~= '' then
+        Util.maybePrintToTable('I see ' .. msg, playerColor)
     end
 
     -- If PDS2, get pds in adjacent systems.
-    Util.printTable('xxx neighbor units', myNeighborUnits)
+    Util.debugLogTable('neighbor units', myNeighborUnits)
     if cards[data.pds2Card.name] and myNeighborUnits['PDS'] then
-        result['PDS'] = (result['PDS'] or 0) + #myNeighborUnits['PDS']
+        local count = #myNeighborUnits['PDS']
+        Util.maybePrintToTable('I see PDS2 with ' .. count .. ' adjacent PDS', playerColor)
+        result['PDS'] = (result['PDS'] or 0) + count
     end
 
     -- If Xxcha flagship, count as extra pds.
@@ -688,6 +789,7 @@ function getCombatSheetValues(playerColor, enemyColor, cards)
     end
     for _, obj in ipairs(allFlagships) do
         if obj.getName() == data.pdsFlagship.name then
+            Util.maybePrintToTable('I see ' .. obj.getName() .. ' for ' .. data.pdsFlagship.pdsCount .. ' extra PDS', playerColor)
             result['PDS'] = (result['PDS'] or 0) + data.pdsFlagship.pdsCount
         end
     end
@@ -710,24 +812,81 @@ function getCombatSheetValues(playerColor, enemyColor, cards)
                 count = count + #unitObjects
             end
         end
+        Util.maybePrintToTable('I see ' .. data.winnuFlagship.name .. ' with ' .. count .. ' dice', playerColor)
         result['Flagship'] = count
     end
 
     return result
 end
 
+function fillMultiRoller(playerColor, cards, units)
+    local multiRoller = nil
+    for _, obj in ipairs(getAllObjects()) do
+        if string.find(obj.getName(), 'TI4 MultiRoller') and Util.getClosestPlayer(obj).color == playerColor then
+            multiRoller = obj
+            break
+        end
+    end
+    if not multiRoller then
+        Util.debugLog('no multiroller')
+        return
+    end
+
+    multiRoller.call('resetCounters')
+
+    for unitName, quantity in pairs(units) do
+        local inputLabel = 'UNIT:' .. unitName
+        local found = false
+        for _, input in ipairs(multiRoller.getInputs()) do
+            if input.label == inputLabel then
+                multiRoller.editInput({ index = input.index, value = quantity })
+                found = true
+                break
+            end
+        end
+        if not found then
+            print('Warning: no input ' .. inputLabel)
+        end
+    end
+
+    if cards[data.antimassDeflectorCard.name] then
+        multiRoller.call('clickAMD')
+    end
+
+    multiRoller.call('updateButton', { multiRoller, playerColor })
+end
+
+function fillMultiRollerForClosestPlayer(obj, playerClickerColor, altClick)
+    local playerColor = Util.getClosestPlayer(obj.getPosition()).color
+    local enemyColor = getEnemyColor(playerColor, hex)
+    Util.debugLog('playerColor=' .. playerColor .. ' enemyColor=' .. tostring(enemyColor or false))
+    local cards = getCombatSheetCards(playerColor, enemyColor)
+    Util.debugLogTable('cards', cards)
+    local units = getCombatSheetValues(playerColor, enemyColor, cards)
+    Util.debugLogTable('units', units)
+    fillMultiRoller(playerColor, cards, units)
+end
+
 -------------------------------------------------------------------------------
 
 function onLoad(save_state)
     print('onLoad')
+    self.createButton({
+        click_function = 'fillMultiRollerForPlayer',
+        function_owner = self,
+        label = 'XXX',
+        width = 600,
+        height = 400,
+    })
+    self.interactable = true
 end
 
-function onObjectPickUp(player_color, picked_up_object)
-    if not isTracked(picked_up_object) then
+function onObjectPickUp(playerColor, pickedUpObject)
+    if not isTracked(pickedUpObject) then
         return
     end
-    local guid = picked_up_object.getGUID()
-    local hexString = tostring(getHex(picked_up_object.getPosition()))
+    local guid = pickedUpObject.getGUID()
+    local hexString = tostring(getHex(pickedUpObject.getPosition()))
     local unitsSet = data.unitsInHex[hexString]
     if unitsSet then
         unitsSet[guid] = nil
@@ -735,18 +894,18 @@ function onObjectPickUp(player_color, picked_up_object)
     Util.debugLog('onObjectPickUp: removed ' .. tostring(guid) .. ' from ' .. tostring(hexString))
 end
 
-function onObjectDrop(player_color, dropped_object)
-    if player_color == Turns.turn_color and string.find(dropped_object.getName(), ' Command Token') and Util.isInTilesZone(dropped_object.getPosition()) then
-        Util.debugLog('onObjectDrop: activated by ' .. player_color)
-        data.lastActivatedHex = getHex(dropped_object.getPosition())
-        data.lastActivatedPlayerColor = player_color
+function onObjectDrop(playerColor, droppedObject)
+    if playerColor == Turns.turn_color and string.find(droppedObject.getName(), ' Command Token') and Util.isInTilesZone(droppedObject.getPosition()) then
+        Util.debugLog('onObjectDrop: activated by ' .. playerColor)
+        data.lastActivatedHex = getHex(droppedObject.getPosition())
+        data.lastActivatedPlayerColor = playerColor
     end
 
-    if not isTracked(dropped_object) then
+    if not isTracked(droppedObject) then
         return
     end
-    local guid = dropped_object.getGUID()
-    local hex = getHex(dropped_object.getPosition())
+    local guid = droppedObject.getGUID()
+    local hex = getHex(droppedObject.getPosition())
     local hexString = tostring(hex)
     local unitsSet = data.unitsInHex[hexString]
     if not unitsSet then
@@ -757,20 +916,11 @@ function onObjectDrop(player_color, dropped_object)
     Util.debugLog('onObjectDrop: added ' .. tostring(guid) .. ' to ' .. tostring(hexString))
 end
 
-function onPickUp(player_color)
+function onPickUp(playerColor)
     -- body...
 end
 
-function onDrop(player_color)
-    local hex = getHex(self.getPosition())
-    local neighbors = getNeighborHexes(hex)
-    local wormholeNeighbors = getWormholeNeighborHexes(hex)
-
-    Util.printTable('unit colors', getUnitColorsInHex(hex))
-
-    local enemyColor = getEnemyColor(player_color)
-    local cards = getCombatSheetCards(player_color, enemy_color)
-    Util.printTable('cards', cards)
-    local units = getCombatSheetValues(player_color, enemy_color, cards)
-    Util.printTable('units', units)
+function onDrop(playerColor)
+    print 'xxx'
+    fillMultiRollerForClosestPlayer(self, playerColor, false)
 end
