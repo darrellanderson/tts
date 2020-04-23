@@ -67,9 +67,12 @@ local data = {
         ['f38182'] = 'delta',
 
         -- Ghost flagship.
-
+        -- (guid will change with player color, no?  Find this one by name.)
 
         -- Ghost extra wormhole tokens.
+        ['0d2f86'] = 'alpha',
+        ['cba3a7'] = 'beta',
+        
     },
 }
 
