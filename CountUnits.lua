@@ -36,6 +36,10 @@ click "Objects" at the top, then "Saved Objects", then this saved object to
 spawn one in the game.  Clicking the "add auto-fill buttons" adds an "auto-fill"
 button to each MultiRoller sheet.
 
+During a game, clicking the "auto-fill" button fills in the combat MultiRoller.
+The script prints console messages to the clicking player, or right click to
+broadcast them to the entire table.
+
 --]]
 
 local data = {
@@ -46,10 +50,15 @@ local data = {
     debugLogEnabled = false,
 
     -- Send light information to all players, suitable for normal use.
-    debugPrintToAllEnabled = true,
+    -- Note that right-clicking the auto-fill button temporarily activates this.
+    debugPrintToSelfEnabled = true,
+    debugPrintToAllEnabled = false,
 
     -- The last position where the active player dropped a command token.
     lastActivatedPosition = nil,
+
+    -- Is the current action done via alt(right)-clicking on a button?
+    altClick = false,
 
     -- Unit attributes:
     -- "ship" boolean is this a ship (vs ground unit).
@@ -160,8 +169,11 @@ end
 
 -- If enabled, send messages.
 function Debug.printToAll(message, color)
-    if data.debugPrintToAllEnabled then
+    if data.debugPrintToAllEnabled or data.altClick then
         printToAll(self.getName() .. ': ' .. message, color)
+    else if data.debugPrintToSelfEnabled then
+        printToColor(self.getName() .. ': ' .. message, color, color)
+    end
     end
 end
 
@@ -182,7 +194,7 @@ function TI4Zone.all()
     local zoneIndexToColor = {}
     for _, obj in ipairs(getAllObjects()) do
         local name = obj.getName()
-        local checkName = string.find(name, "Command Sheet")
+        local checkName = string.find(name, 'Command Sheet')
         if checkName ~= nil then
             local cmdSheetColor = string.sub(name, 16, -2)
             local pos = obj.getPosition()
@@ -263,7 +275,7 @@ end
 -- Uses 2D {x,y} points.
 
 function RedBlobHexLib.Hex(q, r, s)
-    assert(not (math.floor (0.5 + q + r + s) ~= 0), "q + r + s must be 0")
+    assert(not (math.floor (0.5 + q + r + s) ~= 0), 'q + r + s must be 0')
     return {q = q, r = r, s = s}
 end
 function RedBlobHexLib.hexToString(hex)
@@ -743,30 +755,69 @@ function getSelfAndEnemyZones(sheetPosition, unitsInHex)
         zoneIndex = selfZoneIndex
     }
 
-    -- Get enemy color as the non-self units in the hex.  It is possible
-    -- the activated hex has no non-self units, in which case enemy is nil.
-    local colorsInHex = {}
-    for color, _ in pairs(unitsInHex) do
-        table.insert(colorsInHex, color)
+    -- If self is not the color who activated the system (current turn owner)
+    -- then enemy is always the activator.
+    if selfZone.color ~= Turns.turn_color then
+        local enemyZone = {
+            color = Turns.turn_color,
+            zoneIndex = colorToZoneIndex[Turns.turn_color]
+        }
+        return selfZone, enemyZone
     end
 
-    local enemyZone = nil
-    if #colorsInHex < 3 then
-        for _, color in ipairs(colorsInHex) do
-            if color ~= selfZone.color then
-                enemyZone = {
-                    color = color,
-                    zoneIndex = colorToZoneIndex[color]
-                }
-                break
+    -- Otherwise self is the player who activated the system.  The enemy is
+    -- first other ships in the activated system, or failing that who has
+    -- ground forces.  It is possible for (1) an empty system, or (2) more
+    -- than one color of ground forces on idependent planets.  Do not choose
+    -- in those cases.
+    local nonSelfColorsInHex = {}
+    local nonSelfShipColorsInHex = {}
+    for color, units in pairs(unitsInHex) do
+        if color ~= selfZone.color then
+            table.insert(nonSelfColorsInHex, color)
+            for unitName, unitObjects in pairs(units) do
+                if data.units[unitName].ship then
+                    table.insert(nonSelfShipColorsInHex, color)
+                    break
+                end
             end
         end
-    else
-        msg = 'error, more than two colors in system: ' .. Util.listToString(colorsInHex)
-        Debug.errorToAll(msg, selfZone.color)
     end
 
-    return selfZone, enemyZone
+    -- If there are non-self ships, always use that as the enemy.
+    if #nonSelfShipColorsInHex > 0 then
+        if #nonSelfShipColorsInHex == 1 then
+            local enemyColor = nonSelfShipColorsInHex[1]
+            local enemyZone = {
+                color = enemyColor,
+                zoneIndex = colorToZoneIndex[enemyColor]
+            }
+            return selfZone, enemyZone
+        else
+            -- Cannot have more than one non-self ship color.
+            Debug.errorToAll(selfZone.color .. ' space combat sees more than one enemy: ' .. Util.listToString(nonSelfShipColorsInHex))
+            return selfZone, nil
+        end
+    end
+
+    -- Otherwise no ships.  If ground forces use that as enemy.
+    if #nonSelfColorsInHex > 0 then
+        if #nonSelfColorsInHex == 1 then
+            local enemyColor = nonSelfColorsInHex[1]
+            local enemyZone = {
+                color = enemyColor,
+                zoneIndex = colorToZoneIndex[enemyColor]
+            }
+            return selfZone, enemyZone
+        else
+            -- If multiple ground force colors do not choose.
+            Debug.errorToAll(selfZone.color .. ' invasion sees more than one ground force: ' .. Util.listToString(nonSelfColorsInHex))
+            return selfZone, nil
+        end
+    end
+
+    -- No non-self units, no enemy.
+    return selfZone, nil
 end
 
 --- Get cards relevant to the given player/enemy pair.
@@ -943,18 +994,23 @@ function getValuesAndfillMultiRoller(multiRoller, playerClickColor, altClick)
         return
     end
 
+    data.altClick = altClick or false
+
     -- Make pos the center of the hex.
     pos = TI4Hex.position(TI4Hex.hex(pos))
 
-    -- If doing print-to-all, also show the ping arrow over the activated hex.
-    if data.printToAllEnabled then
-        local pos = TI4Hex.position(hex)
-        Player[playerColor].pingTable(pos)
-    end
-
+    -- Get the values.
     local sheetPosition = multiRoller.getPosition()
     local color, units, cards = getCombatSheetValues(sheetPosition, pos)
+
+    -- If doing print-to-all, also show the ping arrow over the activated hex.
+    if data.altClick then
+        Player[color].pingTable(pos)
+    end
+
     fillMultiRoller(multiRoller, color, units, cards)
+
+    data.altClick = false
 end
 
 -------------------------------------------------------------------------------
@@ -968,7 +1024,8 @@ function getAutoFillButton(obj)
     end
 end
 
-function addAutoFillButtonsToMultiRollers()
+function addAutoFillButtonsToMultiRollers(obj, playerClickColor, altClick)
+    local count = 0
     for _, obj in ipairs(getAllObjects()) do
         local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
         if startPos == 1 then
@@ -983,13 +1040,15 @@ function addAutoFillButtonsToMultiRollers()
                     height = 50,
                     position = { x = 0.7, y = 0.2, z = 0 },
                 })
+                count = count + 1
             end
         end
     end
-    print('added auto-fill buttons to MultiRollers')
+    print('added auto-fill buttons to ' .. count .. ' MultiRollers')
 end
 
-function removeAutoFillButtonsFromMultiRollers()
+function removeAutoFillButtonsFromMultiRollers(obj, playerClickColor, altClick)
+    local count = 0
     for _, obj in ipairs(getAllObjects()) do
         local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
         if startPos == 1 then
@@ -997,10 +1056,11 @@ function removeAutoFillButtonsFromMultiRollers()
             if button then
                 --print('removing button from ' .. obj.getName())
                 obj.removeButton(button.index)
+                count = count + 1
             end
         end
     end
-    print('removed auto-fill buttons to MultiRollers')
+    print('removed auto-fill buttons from ' .. count .. ' MultiRollers')
 end
 
 -------------------------------------------------------------------------------
@@ -1009,7 +1069,8 @@ function onLoad(save_state)
     print('onLoad')
 
     -- Scale the block and attach a button with reversed scale.
-    local scale = { x = 3, y = 0.01, z = 1 }
+    local scale = { x = 3, y = 0.1, z = 1 }
+    local buttonScale = { x = 1.0 / scale.x, y = 1.0 / scale.y, z = 1.0 / scale.z }
     self.setScale(scale)
     self.createButton({
         click_function = 'addAutoFillButtonsToMultiRollers',
@@ -1018,8 +1079,8 @@ function onLoad(save_state)
         font_size = 100,
         width = 1200,
         height = 290,
-        position = { x = 0, y = 0.2, z = -0.15 },
-        scale = { x = 1.0 / scale.x, y = 1.0 / scale.y, z = 1.0 / scale.z },
+        position = { x = 0, y = 0.5, z = -0.15 },
+        scale = buttonScale,
     })
     self.createButton({
         click_function = 'removeAutoFillButtonsFromMultiRollers',
@@ -1028,8 +1089,8 @@ function onLoad(save_state)
         font_size = 100,
         width = 1200,
         height = 150,
-        position = { x = 0, y = 0.2, z = 0.3 },
-        scale = { x = 1.0 / scale.x, y = 1.0 / scale.y, z = 1.0 / scale.z },
+        position = { x = 0, y = 0.5, z = 0.3 },
+        scale = buttonScale,
     })
     self.interactable = true
 end
