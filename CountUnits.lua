@@ -14,7 +14,7 @@ Plasma Scoring to activate it for the appropriate unit depending on the next
 action (e.g. Space Cannon vs Bombardment).
 
 PDS2 targets adjacent and through-wormhole, including the Creuss flagship's
-mobile delta wormhole.  The Winnu flagship sets it count to the number of
+mobile delta wormhole.  The Winnu flagship sets its count to the number of
 non-fighter opponents.
 
 The Xxcha flagship acts like an adjacent-reaching PDS x3 (even when the player
@@ -24,10 +24,17 @@ hits on a 5 rather that the PDS1's 6.
 Creuss players might want to enable "grid" on their homeworld so it aligns well
 with the table grid, making sure units on the planet are counted.
 
-This requires Turns be enabed to prevent in order to ignore when a non-active
-player touches a command token.  Turns are automatically enabled via the "place
-trade goods and set turns" button.  For a hot-seat like environment, a player
-must change color to the current active turn recognize system activation.
+This requires Turns be enabed to ignore when a non-active player touches a
+command token.  (Turns are automatically enabled via the "place trade goods and
+set turns" button.)  For a hot-seat like environment, a player must change color
+to the current active turn in order to recognize system activation.
+
+HOW TO USE:
+
+Right click this object and select "Save Object".  Start a TI4 game, then
+click "Objects" at the top, then "Saved Objects", then this saved object to
+spawn one in the game.  Clicking the "add auto-fill buttons" adds an "auto-fill"
+button to each MultiRoller sheet.
 
 --]]
 
@@ -112,6 +119,7 @@ local data = {
     },
 }
 
+-- Organize functions into namespaces.
 local Debug = {}
 local TI4Zone = {}
 local RedBlobHexLib = {}
@@ -163,7 +171,7 @@ function Debug.errorToAll(message, color)
 end
 
 -------------------------------------------------------------------------------
--- TI4 zone locations, borrowed from the TI4 mod Global.Lua
+-- TI4 zone locations, adapted from the TI4 mod Global.Lua
 -- Could achieve something similar using seated players' hand locations,
 -- but this is more flexible for handling things when a player is absent.
 
@@ -229,6 +237,9 @@ function TI4Zone.inside(pos, zoneIndex)
     end
 end
 
+--- Get the closest player zone index.
+-- @param pos {x,y,z} table.
+-- @return zoneIndex integer.
 function TI4Zone.closest(pos)
     local bestZoneIndex = nil
     local bestDistanceSq = nil
@@ -421,6 +432,7 @@ function TI4Hex.wormholeNeighborHexes(hexString)
         wormholeObjects[k] = v
     end
 
+    -- Add any flagship wormholes to the set.
     local flagshipWormholeObjectNames = {}
     for name, flagship in pairs(data.flagships) do
         if flagship.wormhole then
@@ -431,9 +443,12 @@ function TI4Hex.wormholeNeighborHexes(hexString)
     for name, objects in pairs(objectsByName) do
         local flagship = data.flagships[name]
         for _, obj in ipairs(objects) do
+            -- Only consider wormholes in the map/tiles area (Creuss wormhole
+            -- tokens might be on the table but not in use, and cannot be
+            -- on a home system so the external Creuss map tile is not valid).
             -- It is possible for the Creuss flagship to be off the map (outside
             -- Tiles) if it is on the external Creuss home system to the size, but
-            -- that already as a delta wormhole so no special handling needed.
+            -- that already is a delta wormhole so no special handling needed.
             if TI4Zone.inside(obj.getPosition(), 'Tiles') then
                 wormholeObjects[obj.getGUID()] = flagship.wormhole
             end
