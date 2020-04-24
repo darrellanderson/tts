@@ -33,18 +33,16 @@ must change color to the current active turn recognize system activation.
 
 local data = {
     -- Draw colors about activated, neighbor, and through-wormhole hexes.
-    debugVisualizeEnabled = true,
+    debugVisualizeEnabled = false,
 
     -- Verbose logging, not recommended for normal use.
-    debugLogEnabled = true,
+    debugLogEnabled = false,
 
     -- Send light information to all players, suitable for normal use.
     debugPrintToAllEnabled = true,
 
-    printToTablePrefix = 'Auto-fill MultiRoller: ',
-
-    -- The last hex where the active player dropped a command token.
-    lastActivatedHex = nil,
+    -- The last position where the active player dropped a command token.
+    lastActivatedPosition = nil,
 
     -- Unit attributes:
     -- "ship" boolean is this a ship (vs ground unit).
@@ -145,17 +143,23 @@ function Debug.logTable(name, table, indent)
             if type(v) ~= 'table' then
                 print(indent .. tostring(k) .. ' = ' .. tostring(v))
             else
-                Debug.logTable(tostring(k), v, '  ' .. indent)
+                Debug.logTable(tostring(k), v, '   ' .. indent)
             end
         end
     end
     print(indent .. '}')
 end
 
+-- If enabled, send messages.
 function Debug.printToAll(message, color)
     if data.debugPrintToAllEnabled then
         printToAll(self.getName() .. ': ' .. message, color)
     end
+end
+
+--- ALWAYS send these messages.
+function Debug.errorToAll(message, color)
+    printToAll(self.getName() .. ': ' .. message, color)
 end
 
 -------------------------------------------------------------------------------
@@ -164,24 +168,26 @@ end
 -- but this is more flexible for handling things when a player is absent.
 
 --- Get all zones in a single pass of getAllObjects.
--- @return table mapping from player color to zone index.
+-- @return table from color to zone index, table from zone index to color.
 function TI4Zone.all()
-    local result = {}
+    local colorToZoneIndex = {}
+    local zoneIndexToColor = {}
     for _, obj in ipairs(getAllObjects()) do
         local name = obj.getName()
-        local pos = obj.getPosition()
         local checkName = string.find(name, "Command Sheet")
         if checkName ~= nil then
             local cmdSheetColor = string.sub(name, 16, -2)
-            for zone = 1, 6 do
-                if TI4Zone.inside(pos, zone) then
-                    result[cmdSheetColor] = zone
+            local pos = obj.getPosition()
+            for zoneIndex = 1, 6 do
+                if TI4Zone.inside(pos, zoneIndex) then
+                    colorToZoneIndex[cmdSheetColor] = zoneIndex
+                    zoneIndexToColor[zoneIndex] = cmdSheetColor
                     break
                 end
             end
         end
     end
-    return result
+    return colorToZoneIndex, zoneIndexToColor
 end
 
 local xmin = {21, -21, -51, 21, -21, -51}
@@ -224,7 +230,20 @@ function TI4Zone.inside(pos, zoneIndex)
 end
 
 function TI4Zone.closest(pos)
-    
+    local bestZoneIndex = nil
+    local bestDistanceSq = nil
+    for zoneIndex = 1, 6 do
+        local x = (xmin[zoneIndex] + xmax[zoneIndex]) / 2
+        local z = (zmin[zoneIndex] + zmax[zoneIndex]) / 2
+        local dx = pos.x - x
+        local dz = pos.z - z
+        local distanceSq = (dx * dx) + (dz * dz)
+        if not bestDistanceSq or distanceSq < bestDistanceSq then
+            bestZoneIndex = zoneIndex
+            bestDistanceSq = distanceSq
+        end
+    end
+    return bestZoneIndex
 end
 
 -------------------------------------------------------------------------------
@@ -394,7 +413,7 @@ end
 -- adjacent to peer wormholes.
 -- @param hexString hex.
 -- @return list of adjacent-via-wormhole hexes.
-function TI4Hex.getWormholeNeighborHexes(hexString)
+function TI4Hex.wormholeNeighborHexes(hexString)
     -- Copy the map of hardcoded wormhole objects, adding the Cruess
     -- flagship (the guid may vary).
     local wormholeObjects = {}
@@ -468,8 +487,59 @@ function TI4Hex.getUniqueHexes(hexStrings)
     return result
 end
 
+--- Get the hex at location, plus all direct and through-wormhole neighbors.
+-- If debug visualization is enabled draws vector outlines around the hexes.
+-- @param pos {x,y,z} table.
+-- @return hex string, list of neighbor hex strings.
+function TI4Hex.getHexAndAllNeighborsAndMaybeVisualize(pos)
+    local hex = TI4Hex.hex(pos)
+
+    local neighbors = TI4Hex.neighbors(hex)
+    local wormholeNeighbors = TI4Hex.wormholeNeighborHexes(hex)
+
+    if data.debugVisualizeEnabled then
+        local vectors = {}
+        for _, neighbor in ipairs(wormholeNeighbors) do
+            table.insert(vectors, TI4Hex.vectorLines(neighbor, {color={0,0,1,0.7},thickness=0.33}))
+        end
+        for _, neighbor in ipairs(neighbors) do
+            table.insert(vectors, TI4Hex.vectorLines(neighbor, {color={0,1,0,0.7},thickness=0.66}))
+        end
+        table.insert(vectors, TI4Hex.vectorLines(hex, {color={1,0,0,0.7},thickness=1}))
+        Global.setVectorLines(vectors)
+    end
+
+    -- Merge neighbors into a single list.
+    local allNeighbors = Util.joinLists(neighbors, wormholeNeighbors)
+    allNeighbors = TI4Hex.getUniqueHexes(allNeighbors)
+
+    return hex, allNeighbors
+end
+
 -------------------------------------------------------------------------------
 -- Some generic utility functions.
+
+function Util.joinLists(a, b)
+    local result = {}
+    for _, v in ipairs(a) do
+        table.insert(result, v)
+    end
+    for _, v in ipairs(b) do
+        table.insert(result, v)
+    end
+    return result
+end
+
+function Util.listToString(a)
+    local result = ''
+    for i, v in ipairs(a) do
+        if i > 1 then
+            result = result .. ', '
+        end
+        result = result .. tostring(v)
+    end
+    return result
+end
 
 --- Search for a set of objects.
 -- Use this when scanning for multiple objects to reduce the number of passes.
@@ -518,11 +588,12 @@ function Util.playerHasCard(cardObject, zoneIndex)
     return true
 end
 
---- Given a {r,g,b} color from a unit tintColor, return the string player color.
+--- Given a {r,g,b} color from a unit tintColor, return the string color name.
+-- These values are hard-coded from tints assigned to ship models.
 -- @param color {r,g,b} table.
--- @return string player color.
-function Util.playerColor(color)
-    local playerColors = {
+-- @return string unit color.
+function Util.unitColor(color)
+    local unitColors = {
         White = { 204/255, 205/255, 204/255 },
         Blue = { 7/255, 178/255, 255/255 },
         Purple = { 118/255, 0, 183/255 },
@@ -532,56 +603,17 @@ function Util.playerColor(color)
     }
     local bestColor = nil
     local bestDistanceSq = nil
-    for playerColorName, playerColor in pairs(playerColors) do
-        local dr = playerColor[1] - (color.r or color[1])
-        local dg = playerColor[2] - (color.g or color[2])
-        local db = playerColor[3] - (color.b or color[3])
+    for unitColorName, unitColor in pairs(unitColors) do
+        local dr = unitColor[1] - (color.r or color[1])
+        local dg = unitColor[2] - (color.g or color[2])
+        local db = unitColor[3] - (color.b or color[3])
         local distanceSq = (dr * dr) + (dg * dg) + (db * db)
         if not bestDistanceSq or distanceSq < bestDistanceSq then
-            bestColor = playerColorName
+            bestColor = unitColorName
             bestDistanceSq = distanceSq
         end
     end
     return bestColor
-end
-
-function Util.getSelfAndEnemyColors(owningObj, unitsInHex)
-    -- Scans all objects, try not to call more than once!
-    local allZones = TI4Zone.all()
-    Debug.logTable('allZones', allZones)
-
-    -- Get self color based on owning object location.
-    local selfColor = false
-    for color, zoneIndex in pairs(allZones) do
-        if TI4Zone.inside(owningObj.getPosition(), zoneIndex) then
-            selfColor = {
-                color = color,
-                zoneIndex = zoneIndex
-            }
-            break
-        end
-    end
-    Debug.logTable('selfColor', selfColor)
-
-    -- Get enemy color as the non-self units in the hex.  It is possible
-    -- the activated hex has no non-self units, in which case enemy is nil.
-    local enemyColor = false
-    local sawSelf = false
-    for color, units in pairs(unitsInHex) do
-        if selfColor and color == selfColor.color then
-            sawSelf = true
-        elseif enemyColor then
-            Debug.log('already have an enemy color .. too many colors in hex?')
-            printToAll(self.getName() .. ': error, more than two colors in system', selfColor.color)
-        else
-            enemyColor = {
-                color = color,
-                zoneIndex = allZones[color]
-            }
-        end
-    end
-
-    return selfColor, enemyColor
 end
 
 -------------------------------------------------------------------------------
@@ -602,7 +634,7 @@ function Units.parse(obj)
     -- (Could also identify the faction based on unique flagship name, then
     -- inspect player sheets to locate seat).
     if data.flagships[name] then
-        local color = Util.playerColor(obj.getColorTint())
+        local color = Util.unitColor(obj.getColorTint())
         return color, 'Flagship'
     end
 
@@ -621,6 +653,8 @@ function Units.parse(obj)
 end
 
 --- Get units in a primary hex, as well as in a set of neibhbors.
+-- Gather all relevant units in a single pass to reduce all-object scans.
+--
 -- Returns per-color unit collections e.g.
 -- { Yellow = {
 --     Infantry = { obj1, obj2, ... objN },
@@ -679,6 +713,47 @@ end
 
 -------------------------------------------------------------------------------
 
+--- Get my color from player sheet position, deduce enemy from units in hex.
+-- @param selfPosition {x,y,z} table.
+-- @param unitsInHex Units.get result, map from color to unit collection.
+-- @return self{color, zoneIndex}, enemy{color, zoneIndex} (may be nil).
+function getSelfAndEnemyZones(sheetPosition, unitsInHex)
+    -- Scans all objects, try not to call more than once!
+    colorToZoneIndex, zoneIndexToColor = TI4Zone.all()
+
+    -- Get self color based on owning object location.
+    local selfZoneIndex = TI4Zone.closest(sheetPosition)
+    local selfZone = {
+        color = zoneIndexToColor[selfZoneIndex],
+        zoneIndex = selfZoneIndex
+    }
+
+    -- Get enemy color as the non-self units in the hex.  It is possible
+    -- the activated hex has no non-self units, in which case enemy is nil.
+    local colorsInHex = {}
+    for color, _ in pairs(unitsInHex) do
+        table.insert(colorsInHex, color)
+    end
+
+    local enemyZone = nil
+    if #colorsInHex < 3 then
+        for _, color in ipairs(colorsInHex) do
+            if color ~= selfZone.color then
+                enemyZone = {
+                    color = color,
+                    zoneIndex = colorToZoneIndex[color]
+                }
+                break
+            end
+        end
+    else
+        msg = 'error, more than two colors in system: ' .. Util.listToString(colorsInHex)
+        Debug.errorToAll(msg, selfZone.color)
+    end
+
+    return selfZone, enemyZone
+end
+
 --- Get cards relevant to the given player/enemy pair.
 -- E.g., does the player have PDS2, does the enemy have AMD?
 -- @param playerZoneIndex zone.
@@ -713,79 +788,92 @@ function getCombatSheetCards(playerZoneIndex, enemyZoneIndex)
 end
 
 --- Get the number of units affecting the activated system.
--- @param playerColor string.
--- @param enemyColor string (relevant to Winnu flagship).
--- @param cards map of relevant card names to card objects.
--- @return table from unit name to quantity.
-function getCombatSheetValues(selfColor, enemyColor, unitsInHex, unitsInNeighbors, cards)
+-- @param sheetPosition {x,y,z} table for multi-roller sheet, used to find player.
+-- @param activatedHexPosition {x,y,z} table for activated system.
+-- @return table from unit name to quantity, list of relevant cards.
+function getCombatSheetValues(sheetPosition, activatedHexPosition)
+    local resultUnits = {}
+    local resultCards = {}
+
+    -- Get units in hex and neighbors.
+    local hex, neighbors = TI4Hex.getHexAndAllNeighborsAndMaybeVisualize(activatedHexPosition)
+    local unitsInHex, unitsInNeighbors = Units.get(hex, neighbors)
+    -- This table can be large, comment out logging it for now.
+    --Debug.logTable('unitsInNeighbors', unitsInNeighbors)
+
+    -- Get self color based on sheet position, deduce enemy based on units
+    -- in the activated system (may be nil if no enemy units in that system).
+    local selfZone, enemyZone = getSelfAndEnemyZones(sheetPosition, unitsInHex)
+    local selfColor = selfZone and selfZone.color
+    local enemyColor = enemyZone and enemyZone.color
+    Debug.printToAll('filling for ' .. (selfColor or '<unknown>') .. ' vs ' .. (enemyColor or '<unknown>'), selfColor)
+
+    -- Look for relevant cards (e.g. PDS2) in the appropriate self/enemy zones.
+    resultCards = getCombatSheetCards(selfZone and selfZone.zoneIndex, enemyZone and enemyZone.zoneIndex)
+    Debug.logTable('resultCards', resultCards)
+    if resultCards['Antimass Deflectors'] then
+        Debug.printToAll('enemy has Antimass Deflectors', selfColor)
+    end
+    if resultCards['Plasma Scoring'] then
+        Debug.printToAll(selfColor .. ' has Plasma Scoring, apply it to the appropriate unit for different roll types', selfColor)
+    end
+
     -- Get own units in system.
-    local result = {}
     local msg = ''
     local myLocalUnits = (selfColor and unitsInHex[selfColor]) or {}
     for unitName, unitObjects in pairs(myLocalUnits) do
-        result[unitName] = #unitObjects
+        resultUnits[unitName] = #unitObjects
         if msg ~= '' then
             msg = msg .. ', '
         end
-        msg = msg .. result[unitName] .. ' ' .. unitName
+        msg = msg .. resultUnits[unitName] .. ' ' .. unitName
     end
     if msg ~= '' then
-        Debug.printToTable('in system: ' .. msg, selfColor)
+        Debug.printToAll('in system: ' .. msg, selfColor)
     end
 
     -- If PDS2, get pds in adjacent systems.
     local myNeighborUnits = (selfColor and unitsInNeighbors[selfColor]) or {}
-    if cards['PDS II'] and myNeighborUnits['PDS'] then
+    if resultCards['PDS II'] and myNeighborUnits['PDS'] then
         local count = #myNeighborUnits['PDS']
-        Debug.printToTable('PDS2 with ' .. count .. ' adjacent PDS', selfColor)
-        result['PDS'] = (result['PDS'] or 0) + count
+        Debug.printToAll('PDS2 with ' .. count .. ' adjacent PDS', selfColor)
+        resultUnits['PDS'] = (result['PDS'] or 0) + count
     end
 
-    local myLocalFlagships = myLocalUnits['Flagship']
-    local myNeighborFlagships = myNeighborUnits['Flagship']
-    local allFlagships = {}
-    if myLocalFlagships then
-        for _, obj in ipairs(myLocalFlagships) do
-            table.insert(allFlagships, obj)
-        end
-    end
-    if myNeighborFlagships then
-        for _, obj in ipairs(myNeighborFlagships) do
-            table.insert(allFlagships, obj)
-        end
-    end
-    for _, obj in ipairs(allFlagships) do
+    local myLocalFlagships = myLocalUnits['Flagship'] or {}
+    local myNeighborFlagships = myNeighborUnits['Flagship'] or {}
+    local myFlagshipsIncludeNeighbors = Util.joinLists(myLocalFlagships, myNeighborFlagships)
+
+    -- The Xxcha flagship has Space Combat that can shoot adjacent systems.
+    for _, obj in ipairs(myFlagshipsIncludeNeighbors) do
         local name = obj.getName()
         local flagship = data.flagships[name]
-
-        -- If Xxcha flagship, count as extra pds.
-        if flagship and flagship.pdsCount then
-            Debug.printToTable(name .. ' for ' .. flagship.pdsCount .. ' extra PDS', selfColor)
-            result['PDS'] = (result['PDS'] or 0) + flagship.pdsCount
+        if flagship and flagship.pds2Count then
+            Debug.printToAll(name .. ' for ' .. flagship.pds2Count .. ' extra PDS', selfColor)
+            resultUnits['PDS'] = (resultUnits['PDS'] or 0) + flagship.pds2Count
         end
+    end
 
-        -- If Winnu flagship, value is number of non-fighter enemies.
+    -- The Winnu flagship uses the number of non-fighter ships for value.
+    for _, obj in ipairs(myLocalFlagships) do
+        local name = obj.getName()
+        local flagship = data.flagships[name]
         if flagship and flagship.nonFighterDice then
             local count = 0
             local enemyLocalUnits = (enemyColor and unitsInHex[enemyColor]) or {}
-            for unitName, unitObjects in ipairs(enemyLocalUnits) do
-                if data.units[unitName].ship and unitName != 'Fighter' then
+            for unitName, unitObjects in pairs(enemyLocalUnits) do
+                local unitAttributes = data.units[unitName]
+                if data.units[unitName].ship and unitName ~= 'Fighter' then
                     count = count + #unitObjects
                 end
             end
-            Debug.printToTable(name .. ' with ' .. count .. ' dice', playerColor)
-            result['Flagship'] = count
+            Debug.printToAll(name .. ' with ' .. count .. ' dice', selfColor)
+            resultUnits['Flagship'] = count
         end
     end
 
-    if cards['Antimass Deflectors'] then
-        Debug.printToAll('enemy has Antimass Deflectors')
-    end
-    if cards['Plasma Scoring'] then
-        Debug.printToAll(playerColor .. ' has Plasma Scoring, apply it to the appropriate unit for different roll types')
-    end
-
-    return result
+    Debug.logTable('resultUnits', resultUnits)
+    return selfColor, resultUnits, resultCards
 end
 
 --- Inject values into the multiroller.
@@ -793,7 +881,7 @@ end
 -- requires the method names and side effects keep working in future versions
 -- of that independent object.  This would be MUCH better with either a stable
 -- method for injecting values, or by incorporating directly into that object.
-function fillMultiRoller(multiRoller, cards, units)
+function fillMultiRoller(multiRoller, selfColor, units, cards)
     if not multiRoller then
         Debug.log('no MultiRoller')
         return
@@ -830,62 +918,28 @@ function fillMultiRoller(multiRoller, cards, units)
     -- Technically calling "shipPlus" above also does this, but do it again in
     -- case that changes in the future.
     Debug.log('MultiRoller.detectCards')
-    multiRoller.call('detectCards', playerColor)
+    multiRoller.call('detectCards', selfColor)
 end
 
-function autofillMultiRoller(owningObject, playerClickColor, altClick)
-    local hex = data.lastActivatedHex
-    if not hex then
+function getValuesAndfillMultiRoller(multiRoller, playerClickColor, altClick)
+    local pos = data.lastActivatedPosition
+    if not pos then
         print(self.getName() .. ': no activated system, aborting')
         return
     end
+
+    -- Make pos the center of the hex.
+    pos = TI4Hex.position(TI4Hex.hex(pos))
+
+    -- If doing print-to-all, also show the ping arrow over the activated hex.
     if data.printToAllEnabled then
         local pos = TI4Hex.position(hex)
         Player[playerColor].pingTable(pos)
     end
 
-    -- Get activated hex and neighbors.
-    local neighbors = TI4Hex.neighbors(hex)
-    local wormholeNeighbors = TI4Hex.getWormholeNeighborHexes(hex)
-    local allNeighbors = {}
-    for _, hex in ipairs(neighbors) do
-        table.insert(allNeighbors, hex)
-    end
-    for _, hex in ipairs(wormholeNeighbors) do
-        table.insert(allNeighbors, hex)
-    end
-    allNeighbors = TI4Hex.getUniqueHexes(allNeighbors)
-    if data.debugVisualizeEnabled then
-        local vectors = {}
-        for _, neighbor in ipairs(wormholeNeighbors) do
-            table.insert(vectors, TI4Hex.vectorLines(neighbor, {color={0,0,1,0.7},thickness=0.33}))
-        end
-        for _, neighbor in ipairs(neighbors) do
-            table.insert(vectors, TI4Hex.vectorLines(neighbor, {color={0,1,0,0.7},thickness=0.66}))
-        end
-        table.insert(vectors, TI4Hex.vectorLines(hex, {color={1,0,0,0.7},thickness=1}))
-        Global.setVectorLines(vectors)
-    end
-
-    -- Get units.
-    local unitsInHex, unitsInNeighbors = Units.get(hex, allNeighbors)
-    Debug.logTable('unitsInHex', unitsInHex)
-    Debug.logTable('unitsInNeighbors', unitsInNeighbors)
-
-    -- Get colors.
-    local selfColor, enemyColor = Util.getSelfAndEnemyColors(owningObject, unitsInHex)
-    Debug.logTable('selfColor', selfColor)
-    Debug.logTable('enemyColor', enemyColor)
-    Debug.printToAll('filling for ' .. (selfColor and selfColor.color or '<unknown>') .. ' vs ' .. (enemyColor and enemyColor.color or '<unknown>'), playerColor)
-
-    -- Get cards.
-    local cards = getCombatSheetCards(selfColor and selfColor.zoneIndex, enemyColor and enemyColor.zoneIndex)
-    Debug.logTable('cards', cards)
-
-    local values = getCombatSheetValues(selfColor and selfColor.color, enemyColor and enemyColor.color, unitsInHex, unitsInNeighbors, cards)
-
-    -- TODO merge units, flagships, cards.
-    fillMultiRoller(owningObject, cards, selfColor and unitsInHex[selfColor.color])
+    local sheetPosition = multiRoller.getPosition()
+    local color, units, cards = getCombatSheetValues(sheetPosition, pos)
+    fillMultiRoller(multiRoller, color, units, cards)
 end
 
 -------------------------------------------------------------------------------
@@ -904,9 +958,9 @@ function addAutoFillButtonsToMultiRollers()
         local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
         if startPos == 1 then
             if not getAutoFillButton(obj) then
-                print('adding button to ' .. obj.getName())
+                --print('adding button to ' .. obj.getName())
                 obj.createButton({
-                    click_function = 'autofillMultiRoller',
+                    click_function = 'getValuesAndfillMultiRoller',
                     function_owner = self,
                     label = 'AUTO-FILL\nMULTIROLLER',
                     font_size = 40,
@@ -917,6 +971,7 @@ function addAutoFillButtonsToMultiRollers()
             end
         end
     end
+    print('added auto-fill buttons to MultiRollers')
 end
 
 function removeAutoFillButtonsFromMultiRollers()
@@ -925,11 +980,12 @@ function removeAutoFillButtonsFromMultiRollers()
         if startPos == 1 then
             local button = getAutoFillButton(obj)
             if button then
-                print('removing button from ' .. obj.getName())
+                --print('removing button from ' .. obj.getName())
                 obj.removeButton(button.index)
             end
         end
     end
+    print('removed auto-fill buttons to MultiRollers')
 end
 
 -------------------------------------------------------------------------------
@@ -966,6 +1022,6 @@ end
 function onObjectDrop(playerColor, droppedObject)
     if playerColor == Turns.turn_color and string.find(droppedObject.getName(), ' Command Token') and TI4Zone.inside(droppedObject.getPosition(), 'Tiles') then
         Debug.log('onObjectDrop: activated by ' .. playerColor)
-        data.lastActivatedHex = TI4Hex.hex(droppedObject.getPosition())
+        data.lastActivatedPosition = droppedObject.getPosition()
     end
 end
