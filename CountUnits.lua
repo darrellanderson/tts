@@ -1,10 +1,29 @@
---- Unit counter, fill in battle sheets.
+--- Auto-fill the_Mantis's TI4 MutliRoller (tested with v3.46.0).
 -- @author bonkersbgg at boardgamegeek.com
+--[[
+
+This script tracks the last activated system, computing fleets for the owning
+player (either attacker or defender) to fill in the MultiRoller.
+
+It includes adjacent PDS2 (even through wormholes and the delta wormhole
+Creuss flagship), and fills in the Winnu flagship count to be the number
+of non-fighter enemies.
+
+It considers the Xxcha flagship as 3x PDS that can always reach adjacent
+systems, which is not quite right when using PDS1 as the flagship is Space
+Cannon 5, not 6.
+
+Creuss players might want to toggle "grid" so their homeworld aligns well
+with the table grid, making sure units on the planet are counted.
+
+]]
 
 local data = {
-    debugVisualize = true,
+    debugVisualize = false,
     debugLogEnabled = false,
     maybePrintToTable = true,
+
+    printToTablePrefix = 'Auto-fill MultiRoller: ',
 
     -- Map from hex id (tostring(hex)) to set of guids (map from guid to true).
     -- e.g. { '<0,0,0>' = { 'guid1' = true, 'guid2' = true }}.
@@ -97,11 +116,12 @@ local data = {
     winnuFlagship = { name = 'Salai Sai Corian' },
 
     pds2Card = { name = 'PDS II' },
-    antimassDeflectorCard = { name = 'Antimass Deflector' },
+    antimassDeflectorCard = { name = 'Antimass Deflectors' },
     plasmaScoringCard = { name = 'Plasma Scoring' },
 
-    -- Map from player color name to value.
+    -- Map from TI4 player color name to value.
     playerColors = {
+        --[[
         White = {1, 1, 1},
         Brown = {0.443, 0.231, 0.09},
         Red = {0.856, 0.1, 0.094},
@@ -114,13 +134,21 @@ local data = {
         Pink = {0.96, 0.439, 0.807},
         Grey = {0.5, 0.5, 0.5},
         Black = {0.25, 0.25, 0.25}
-    },
+        --]]
+        White = { 204/255, 205/255, 204/255 },
+        Blue = { 7/255, 178/255, 255/255 },
+        Purple = { 118/255, 0, 183/255 },
+        Green = { 0, 117/255, 6/255 },
+        Red = { 203/255, 0, 0 },
+        Yellow = { 165/255, 163/255, 0 },
 
+    },
 }
 
 -- Function collections.
 local HexGrid = {}
 local Util = {}
+local TI4Zones = {}
 
 -------------------------------------------------------------------------------
 -- Hex grid math from redblobgames
@@ -280,7 +308,6 @@ function getWormholeNeighborHexes(hex)
     end
     for _, obj in ipairs(getAllObjects()) do
         if obj.getName() == data.wormholeFlagship.name and Util.isInTilesZone(obj.getPosition()) then
-            obj.highlightOn({0,1,0}, 10)
             wormholeObjects[obj.getGUID()] = data.wormholeFlagship.wormhole
             break
         end
@@ -301,9 +328,14 @@ function getWormholeNeighborHexes(hex)
     for guid, wormhole in pairs(wormholeObjects) do
         if wormholesInHex[wormhole] then
             local obj = getObjectFromGUID(guid)
-            local objHex = obj and getHex(obj.getPosition())
-            if objHex ~= hex then
-                table.insert(result, objHex)
+            if obj then
+                local objHex = getHex(obj.getPosition())
+                -- With the exception of the Cruss homeworld, require other
+                -- wormholes be in the map area.
+                local goodPos = guid == 'f38182' or Util.isInTilesZone(obj.getPosition())
+                if objHex ~= hex and goodPos then
+                    table.insert(result, objHex)
+                end
             end
         end
     end
@@ -330,6 +362,91 @@ function getUniqueHexes(hexes)
 end
 
 -------------------------------------------------------------------------------
+-- TI4 zone locations, borrowed from the TI4 mod Global.Lua
+-- This is not strictly necessary if only dealing with seated players,
+-- but easier to test when just moving piece colors.
+
+function TI4Zones.getZone(playerColor)
+    local allObjects = getAllObjects()
+    local currentZone
+    for i, object in ipairs(allObjects) do
+        --check position and compare to drawer zone ranges
+        local name = object.getName()
+        local pos = object.getPosition()
+        local checkName = string.find(name, "Command Sheet")
+        if checkName ~= nil then
+            local cmdSheetColor = string.sub(name,16,-2)
+            if cmdSheetColor == playerColor then
+                for zone = 1, 6 do
+                    if TI4Zones.isInZone(pos, zone) then
+                        return zone
+                    end
+                end
+            end
+        end
+    end
+    if currentZone == nil then
+        broadcastToColor("No Command Sheet Detected.", playerColor, {0.8,0.2,0.2})
+        return
+    end
+end
+
+--- Get all zones in a single pass of getAllObjects.
+function TI4Zones.getAllZones()
+    local result = {}
+    for _, obj in ipairs(getAllObjects()) do
+        local name = object.getName()
+        local pos = object.getPosition()
+        local checkName = string.find(name, "Command Sheet")
+        if checkName ~= nil then
+            local cmdSheetColor = string.sub(name, 16, -2)
+            for zone = 1, 6 do
+                if TI4Zones.isInZone(pos, zone) then
+                    result[cmdSheetColor] = zone
+                    break
+                end
+            end
+        end
+    end
+    return result
+end
+
+local xmin = {21, -21, -51, 21, -21, -51}
+local xmax = {51, 21, -21, 51, 21, -21}
+local zmin = {-50, -50, -50, 6, 21, 6}
+local zmax = {-6, -21, -6, 49, 49, 49}
+
+function TI4Zones.isInZone(pos, zoneIndex)
+    local minimumZ
+    local maximumZ
+    if zoneIndex == 2 then
+        if pos.x > 1.5 then
+            maximumZ = 0.6 * pos.x - 20.4
+            return pos.x >= xmin[zoneIndex] and pos.x <= xmax[zoneIndex] and pos.z >= zmin[zoneIndex] and pos.z <= maximumZ
+        elseif pos.x <-1.5 then
+            maximumZ = -0.6 * pos.x - 20.4
+            return pos.x >= xmin[zoneIndex] and pos.x <= xmax[zoneIndex] and pos.z >= zmin[zoneIndex] and pos.z <= maximumZ
+        else
+            return pos.x >= xmin[zoneIndex] and pos.x <= xmax[zoneIndex] and pos.z >= zmin[zoneIndex] and pos.z <= -21
+        end
+    elseif zoneIndex == 5 then
+        if pos.x > 1.5 then
+            minimumZ = -0.6 * pos.x + 20.4
+            return pos.x >= xmin[zoneIndex] and pos.x <= xmax[zoneIndex] and pos.z >= minimumZ and pos.z <= zmax[zoneIndex]
+        elseif pos.x <-1.5 then
+            minimumZ = 0.6 * pos.x + 20.4
+            return pos.x >= xmin[zoneIndex] and pos.x <= xmax[zoneIndex] and pos.z >= minimumZ and pos.z <= zmax[zoneIndex]
+        else
+            return pos.x >= xmin[zoneIndex] and pos.x <= xmax[zoneIndex] and pos.z >= 21 and pos.z <= zmax[zoneIndex]
+        end
+    elseif zoneIndex == 1 or zoneIndex == 3 or zoneIndex == 4 or zoneIndex == 6 then
+        return pos.x >= xmin[zoneIndex] and pos.x <= xmax[zoneIndex] and pos.z >= zmin[zoneIndex] and pos.z <= zmax[zoneIndex]
+    elseif zoneIndex == 'Tiles' then
+        return pos.x >= -28 and pos.x <= 28 and pos.z >= -28 and pos.z <= 28
+    end
+end
+
+-------------------------------------------------------------------------------
 
 function Util.debugLog(message)
     if data.debugLogEnabled then
@@ -343,6 +460,10 @@ function Util.debugLogTable(name, table, indent)
     end
     if not indent then
         indent = ''
+    end
+    if not table then
+        print(indent .. name .. ' = nil')
+        return
     end
     print(indent .. name .. ' = {')
     if table then
@@ -435,6 +556,10 @@ end
 -- @param cardObject object.
 -- @return boolean true of player has card.
 function Util.playerHasCard(playerColor, cardObject)
+    if not playerColor then
+        return false
+    end
+
     -- Reject if face down.
     if cardObject.is_face_down then
         return false
@@ -446,7 +571,15 @@ function Util.playerHasCard(playerColor, cardObject)
     end
 
     -- Reject if closer to another player.
-    if not Util.getClosestPlayer(cardObject.getPosition()).color then
+    --[[
+    local c = Util.getClosestPlayer(cardObject.getPosition()).color
+    if playerColor ~= Util.getClosestPlayer(cardObject.getPosition()).color then
+        return false
+    end
+    --]]
+    -- Use zones rather than seated players.
+    local zone = TI4Zones.getZone(playerColor)
+    if not TI4Zones.isInZone(cardObject.getPosition(), zone) then
         return false
     end
 
@@ -455,7 +588,7 @@ end
 
 function Util.maybePrintToTable(message, color)
     if data.maybePrintToTable then
-        printToAll('Combat Sheet Filler: ' .. message, color)
+        printToAll(data.printToTablePrefix .. message, color)
     end
 end
 
@@ -646,7 +779,7 @@ function getEnemyColor(playerColor)
 
     -- There is not necessarily a defender if no other players in system.
     local defenderColor = defender(hex)
-    Util.debugLog('attacker ' .. tostring(attackerColor) .. ', defender ' .. tostring(defenderColor))
+    Util.debugLog('attacker ' .. tostring(attackerColor or '<unknown>') .. ', defender ' .. tostring(defenderColor or '<unknown>'))
 
     -- The enemy color is the defender if we are the attacker, or the attacker
     -- if we are not the attacker (remember there may not be a defender).
@@ -716,7 +849,7 @@ function getCombatSheetValues(playerColor, enemyColor, cards)
         return
     end
 
-    Util.maybePrintToTable('filling for ' .. (playerColor or '?') .. ' attacking ' .. (enemyColor or '?'), playerColor)
+    Util.maybePrintToTable('filling for ' .. (playerColor or '<unknown>') .. ' attacking ' .. (enemyColor or '<unknown>'), playerColor)
     if data.maybePrintToTable then
         local pos = getHexPosition(hex)
         Player[playerColor].pingTable(pos)
@@ -762,14 +895,14 @@ function getCombatSheetValues(playerColor, enemyColor, cards)
         msg = msg .. result[unitName] .. ' ' .. unitName
     end
     if msg ~= '' then
-        Util.maybePrintToTable('I see ' .. msg, playerColor)
+        Util.maybePrintToTable('in system: ' .. msg, playerColor)
     end
 
     -- If PDS2, get pds in adjacent systems.
     Util.debugLogTable('neighbor units', myNeighborUnits)
     if cards[data.pds2Card.name] and myNeighborUnits['PDS'] then
         local count = #myNeighborUnits['PDS']
-        Util.maybePrintToTable('I see PDS2 with ' .. count .. ' adjacent PDS', playerColor)
+        Util.maybePrintToTable('PDS2 with ' .. count .. ' adjacent PDS', playerColor)
         result['PDS'] = (result['PDS'] or 0) + count
     end
 
@@ -789,7 +922,7 @@ function getCombatSheetValues(playerColor, enemyColor, cards)
     end
     for _, obj in ipairs(allFlagships) do
         if obj.getName() == data.pdsFlagship.name then
-            Util.maybePrintToTable('I see ' .. obj.getName() .. ' for ' .. data.pdsFlagship.pdsCount .. ' extra PDS', playerColor)
+            Util.maybePrintToTable(obj.getName() .. ' for ' .. data.pdsFlagship.pdsCount .. ' extra PDS', playerColor)
             result['PDS'] = (result['PDS'] or 0) + data.pdsFlagship.pdsCount
         end
     end
@@ -812,52 +945,89 @@ function getCombatSheetValues(playerColor, enemyColor, cards)
                 count = count + #unitObjects
             end
         end
-        Util.maybePrintToTable('I see ' .. data.winnuFlagship.name .. ' with ' .. count .. ' dice', playerColor)
+        Util.maybePrintToTable(data.winnuFlagship.name .. ' with ' .. count .. ' dice', playerColor)
         result['Flagship'] = count
+    end
+
+    if cards[data.antimassDeflectorCard.name] then
+        Util.maybePrintToTable('enemy has ' .. data.antimassDeflectorCard.name, playerColor)
+    end
+    if cards[data.plasmaScoringCard.name] then
+        Util.maybePrintToTable(playerColor .. ' has ' .. data.plasmaScoringCard.name .. ', apply it to the appropriate unit for different roll types', playerColor)
     end
 
     return result
 end
 
+--- Inject values into the multiroller.
+-- I hate to abuse another object's methods especially since this functionality
+-- requires the method names and side effects keep working in future versions
+-- of that independent object.  This would be MUCH better with either a stable
+-- method for injecting values, or by incorporating directly into that object.
 function fillMultiRoller(playerColor, cards, units)
     local multiRoller = nil
+
+    -- There may be more rollers at the table than seated players.
+    local handPosition = Player[playerColor].getHandTransform(1).position
+    local bestDistanceSq = nil
     for _, obj in ipairs(getAllObjects()) do
-        if string.find(obj.getName(), 'TI4 MultiRoller') and Util.getClosestPlayer(obj).color == playerColor then
-            multiRoller = obj
-            break
+        local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
+        if startPos == 1 then
+            local position = obj.getPosition()
+            local dx = position.x - handPosition.x
+            local dy = position.y - handPosition.y
+            local dz = position.z - handPosition.z
+            local distanceSq = (dx * dx) + (dy * dy) + (dz * dz)
+            if not bestDistanceSq or distanceSq < bestDistanceSq then
+                multiRoller = obj
+                bestDistanceSq = distanceSq
+            end
         end
     end
     if not multiRoller then
-        Util.debugLog('no multiroller')
+        Util.debugLog('no MultiRoller')
         return
     end
+    Util.debugLog('MultiRoller guid ' .. multiRoller.getGUID())
 
+    Util.debugLog('MultiRoller.resetCounters')
     multiRoller.call('resetCounters')
 
-    for unitName, quantity in pairs(units) do
-        local inputLabel = 'UNIT:' .. unitName
-        local found = false
-        for _, input in ipairs(multiRoller.getInputs()) do
-            if input.label == inputLabel then
-                multiRoller.editInput({ index = input.index, value = quantity })
-                found = true
-                break
+    local inputs = multiRoller.getInputs()
+    if units then
+        for unitName, quantity in pairs(units) do
+            local inputLabel = 'UNIT:' .. unitName
+            local found = false
+            for _, input in ipairs(inputs) do
+                if input.label == inputLabel then
+                    found = true
+                    multiRoller.editInput({ index = input.index, value = quantity })
+                    break
+                end
             end
-        end
-        if not found then
-            print('Warning: no input ' .. inputLabel)
+            if not found then
+                print('Warning: no input ' .. inputLabel)
+            end
         end
     end
 
     if cards[data.antimassDeflectorCard.name] then
+        Util.debugLog('MultiRoller.clickAMD')
         multiRoller.call('clickAMD')
     end
 
-    multiRoller.call('updateButton', { multiRoller, playerColor })
+    -- Click the "update button" by calling the associated downstream function.
+    -- Technically calling "shipPlus" above also does this, but do it again in
+    -- case that changes in the future.
+    Util.debugLog('MultiRoller.detectCards')
+    multiRoller.call('detectCards', playerColor)
 end
 
 function fillMultiRollerForClosestPlayer(obj, playerClickerColor, altClick)
+    Util.debugLog('fill obj=' .. obj.getName() .. ' clicker=' .. tostring(playerClickerColor) .. ' altClick=' .. tostring(altClick))
+    Util.debugLog('obj name=' .. obj.getName())
     local playerColor = Util.getClosestPlayer(obj.getPosition()).color
+    Util.debugLog('closest playerColor=' .. playerColor)
     local enemyColor = getEnemyColor(playerColor, hex)
     Util.debugLog('playerColor=' .. playerColor .. ' enemyColor=' .. tostring(enemyColor or false))
     local cards = getCombatSheetCards(playerColor, enemyColor)
@@ -869,16 +1039,78 @@ end
 
 -------------------------------------------------------------------------------
 
+function getAutoFillButton(obj)
+    local buttons = obj.getButtons()
+    for _, button in ipairs(buttons) do
+        if button.label == 'AUTO-FILL\nMULTIROLLER' then
+            return button
+        end
+    end
+end
+
+function addAutoFillButtonsToMultiRollers()
+    for _, obj in ipairs(getAllObjects()) do
+        local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
+        if startPos == 1 then
+            if not getAutoFillButton(obj) then
+                Util.debugLog('adding button to ' .. obj.getName())
+                obj.createButton({
+                    click_function = 'fillMultiRollerForClosestPlayer',
+                    function_owner = self,
+                    label = 'AUTO-FILL\nMULTIROLLER',
+                    font_size = 40,
+                    width = 300,
+                    height = 50,
+                    position = { x = 0.7, y = 0.2, z = 0 },
+                })
+            end
+        end
+    end
+end
+
+function removeAutoFillButtonsFromMultiRollers()
+    for _, obj in ipairs(getAllObjects()) do
+        local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
+        if startPos == 1 then
+            local button = getAutoFillButton(obj)
+            if button then
+                Util.debugLog('removing button from ' .. obj.getName())
+                obj.removeButton(button.index)
+            end
+        end
+    end
+end
+
+-------------------------------------------------------------------------------
+
 function onLoad(save_state)
-    print('onLoad')
+    -- Scale the block and attach a button with reversed scale.
+    local scale = { x = 3, y = 0.01, z = 1 }
+    self.setScale(scale)
     self.createButton({
-        click_function = 'fillMultiRollerForPlayer',
+        click_function = 'addAutoFillButtonsToMultiRollers',
         function_owner = self,
-        label = 'XXX',
-        width = 600,
-        height = 400,
+        label = 'ADD AUTO-FILL\nMULTIROLLER BUTTONS',
+        font_size = 100,
+        width = 1200,
+        height = 290,
+        position = { x = 0, y = 0.2, z = -0.15 },
+        scale = { x = 1.0 / scale.x, y = 1.0 / scale.y, z = 1.0 / scale.z },
+    })
+    self.createButton({
+        click_function = 'removeAutoFillButtonsFromMultiRollers',
+        function_owner = self,
+        label = 'REMOVE',
+        font_size = 100,
+        width = 1200,
+        height = 150,
+        position = { x = 0, y = 0.2, z = 0.3 },
+        scale = { x = 1.0 / scale.x, y = 1.0 / scale.y, z = 1.0 / scale.z },
     })
     self.interactable = true
+
+    -- TODO: ships already on the board (say, after a load) do not get onDrop.
+    -- Maybe wait for everything to load then seed the unit maps?
 end
 
 function onObjectPickUp(playerColor, pickedUpObject)
@@ -921,6 +1153,5 @@ function onPickUp(playerColor)
 end
 
 function onDrop(playerColor)
-    print 'xxx'
     fillMultiRollerForClosestPlayer(self, playerColor, false)
 end
