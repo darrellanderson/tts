@@ -15,11 +15,7 @@ action (e.g. Space Cannon vs Bombardment).
 
 PDS2 targets adjacent and through-wormhole, including the Creuss flagship's
 mobile delta wormhole.  The Winnu flagship sets its count to the number of
-non-fighter opponents.
-
-The Xxcha flagship acts like an adjacent-reaching PDS x3 (even when the player
-has not researched PDS2), which is not quite right as the flagship Space Cannon
-hits on a 5 rather that the PDS1's 6.
+non-fighter opponents.  The Xxcha flagship has an adjacent-reaching PDS.
 
 Creuss players might want to enable "grid" on their homeworld so it aligns well
 with the table grid, making sure units on the planet are counted.
@@ -91,12 +87,12 @@ local data = {
         ['Hil Colish'] = { faction = 'The Ghosts of Creuss', wormhole = 'delta' },
         ['[0.0.1]'] = { faction = 'The L1Z1X Mindnet' },
         ['Fourth Moon'] = { faction = 'The Mentak Coalition' },
-        ['Matriarch'] = { faction = 'The Naalu Collective' },
-        ['The Alastor'] = { faction = 'The Nekro Virus' },
+        ['Matriarch'] = { faction = 'The Naalu Collective', fighersOnGround = true },
+        ['The Alastor'] = { faction = 'The Nekro Virus', infantryInSpace = true },
         ["C'morran N'orr"] = { faction = "The Sardakk N'orr" },
         ['J.N.S. Hylarim'] = { faction = 'The Universities of Jol-Nar' },
         ['Salai Sai Corian'] = { faction = 'The Winnu', nonFighterDice = true },
-        ['Loncara Ssodu'] = { faction = 'The Xxcha Kingdom', pds2Count = 3 },
+        ['Loncara Ssodu'] = { faction = 'The Xxcha Kingdom', spaceCannon = true },
         ['Van Hauge'] = { faction = 'The Yin Brotherhood' },
         ["Y'sia Y'ssrila"] = { faction = 'The Yssaril Tribes' },
     },
@@ -169,10 +165,20 @@ end
 
 -- If enabled, send messages.
 function Debug.printToAll(message, color)
+    -- Add a prefix to make it clear where the message came from.
+    local message = self.getName() .. ': ' .. message
     if data.debugPrintToAllEnabled or data.altClick then
-        printToAll(self.getName() .. ': ' .. message, color)
+        printToAll(message, color)
     else if data.debugPrintToSelfEnabled then
-        printToColor(self.getName() .. ': ' .. message, color, color)
+        for _, seated in ipairs(getSeatedPlayers()) do
+            if seated == color then
+                printToColor(message, color, color)
+                return
+            end
+        end
+        -- If we get here, there is no player with that color.
+        -- Just print to the cliker's console.
+        print(message)
     end
     end
 end
@@ -738,6 +744,54 @@ function Units.get(hexString, neighborHexStrings)
     return unitsInHex, unitsInNeighbors
 end
 
+--- Restrict to units of a specific type.
+-- @param units map from unit name to list of unit objects.
+-- @param want list of strings, any of {pds, ship, ground}
+-- @return units map from unit name to list of unit objects.
+function Units.filter(units, wantList)
+    -- Get relevant flagship attributes.
+    local fighersOnGround = false
+    local infantryInSpace = false
+    local flagshipIsPds = false
+    local flagships = units['Flagship'] or {}
+    for _, unitObject in ipairs(flagships) do
+        local flagship = data.flagships[unitObject.getName()] or {}
+        fighersOnGround = fighersOnGround or flagship.fighersOnGround
+        infantryInSpace = infantryInSpace or flagship.infantryInSpace
+        flagshipIsPds = flagshipIsPds or flagship.spaceCannon
+    end
+
+    local result = {}
+    for unitName, unitList in pairs(units) do
+        local unit = data.units[unitName] or {}
+
+        -- With flagship attributes, a unit can be more than one type.
+        local is = {}
+        is.pds = unitName == 'PDS' or (flagshipIsPds and unitName == 'Flagship')
+        is.ship = unit.ship or (infantryInSpace and unitName == 'Infantry')
+        is.ground = (not unit.ship) or (fighersOnGround and unitName == 'Fighter')
+
+        for _, want in ipairs(wantList) do
+            if is[want] then
+                result[unitName] = unitList
+                break
+            end
+        end
+    end
+    return result
+end
+
+--- Filter, but with a color to units collection.
+-- @param colorToUnits map from color to units collection (name to unit objects lists).
+-- @return map from color to filtered units collection.
+function Units.filterPerColor(colorToUnits, wantList)
+    local result = {}
+    for color, units in pairs(colorToUnits) do
+        result[color] = Units.filter(units, wantList)
+    end
+    return result
+end
+
 -------------------------------------------------------------------------------
 
 --- Get my color from player sheet position, deduce enemy from units in hex.
@@ -751,7 +805,7 @@ function getSelfAndEnemyZones(sheetPosition, unitsInHex)
     -- Get self color based on owning object location.
     local selfZoneIndex = TI4Zone.closest(sheetPosition)
     local selfZone = {
-        color = zoneIndexToColor[selfZoneIndex],
+        color = zoneIndexToColor[selfZoneIndex] or 'Grey',
         zoneIndex = selfZoneIndex
     }
 
@@ -856,14 +910,20 @@ end
 --- Get the number of units affecting the activated system.
 -- @param sheetPosition {x,y,z} table for multi-roller sheet, used to find player.
 -- @param activatedHexPosition {x,y,z} table for activated system.
+-- @param wantList list of {pds, ship, ground} strings to restrict results.
 -- @return table from unit name to quantity, list of relevant cards.
-function getCombatSheetValues(sheetPosition, activatedHexPosition)
+function getCombatSheetValues(sheetPosition, activatedHexPosition, wantList)
     local resultUnits = {}
     local resultCards = {}
 
     -- Get units in hex and neighbors.
     local hex, neighbors = TI4Hex.getHexAndAllNeighborsAndMaybeVisualize(activatedHexPosition)
     local unitsInHex, unitsInNeighbors = Units.get(hex, neighbors)
+    if wantList then
+        unitsInHex = Units.filterPerColor(unitsInHex, wantList)
+        unitsInNeighbors = Units.filterPerColor(unitsInNeighbors, wantList)
+    end
+
     -- This table can be large, comment out logging it for now.
     --Debug.logTable('unitsInNeighbors', unitsInNeighbors)
 
@@ -914,9 +974,9 @@ function getCombatSheetValues(sheetPosition, activatedHexPosition)
     for _, obj in ipairs(myFlagshipsIncludeNeighbors) do
         local name = obj.getName()
         local flagship = data.flagships[name]
-        if flagship and flagship.pds2Count then
-            Debug.printToAll(name .. ' for ' .. flagship.pds2Count .. ' extra PDS', selfColor)
-            resultUnits['PDS'] = (resultUnits['PDS'] or 0) + flagship.pds2Count
+        if flagship and flagship.spaceCannon then
+            Debug.printToAll(name .. ' has space cannon', selfColor)
+            resultUnits['Flagship'] = (resultUnits['Flagship'] or 0) + 1
         end
     end
 
@@ -987,13 +1047,16 @@ function fillMultiRoller(multiRoller, selfColor, units, cards)
     multiRoller.call('detectCards', selfColor)
 end
 
-function getValuesAndfillMultiRoller(multiRoller, playerClickColor, altClick)
+-------------------------------------------------------------------------------
+
+function autoFill(multiRoller, altClick, wantList)
     local pos = data.lastActivatedPosition
     if not pos then
         print(self.getName() .. ': no activated system, aborting')
         return
     end
 
+    -- Right-click buttons to print messages to all rather than just self.
     data.altClick = altClick or false
 
     -- Make pos the center of the hex.
@@ -1001,7 +1064,7 @@ function getValuesAndfillMultiRoller(multiRoller, playerClickColor, altClick)
 
     -- Get the values.
     local sheetPosition = multiRoller.getPosition()
-    local color, units, cards = getCombatSheetValues(sheetPosition, pos)
+    local color, units, cards = getCombatSheetValues(sheetPosition, pos, wantList)
 
     -- If doing print-to-all, also show the ping arrow over the activated hex.
     if data.altClick then
@@ -1013,33 +1076,139 @@ function getValuesAndfillMultiRoller(multiRoller, playerClickColor, altClick)
     data.altClick = false
 end
 
--------------------------------------------------------------------------------
-
-function getAutoFillButton(obj)
-    local buttons = obj.getButtons()
-    for _, button in ipairs(buttons) do
-        if button.label == 'AUTO-FILL\nMULTIROLLER' then
-            return button
-        end
-    end
+function onClickAutoFillPds(multiRoller, playerClickColor, altClick)
+    autoFill(multiRoller, altClick, {'pds'})
 end
 
-function addAutoFillButtonsToMultiRollers(obj, playerClickColor, altClick)
+function onClickAutoFillShip(multiRoller, playerClickColor, altClick)
+    autoFill(multiRoller, altClick, {'ship'})
+end
+
+function onClickAutoFillGround(multiRoller, playerClickColor, altClick)
+    autoFill(multiRoller, altClick, {'ground'})
+end
+
+-------------------------------------------------------------------------------
+
+function getAutoFillButtons(obj)
+    local result = {}
+    local buttons = obj.getButtons()
+    for _, button in ipairs(buttons) do
+        -- Hyphen is a special character, use '%-' to find one.
+        local startPos, endPos = string.find(button.label, 'AUTO%-FILL')
+        if startPos == 1 then
+            table.insert(result, button)
+        end
+    end
+    return (#result > 0 and result) or nil
+end
+
+function addAutoFillButtonsToMultiRoller(obj)
+    local autoFillButtons = getAutoFillButtons(obj)
+    if autoFillButtons then
+        -- Already have buttons.
+        return false
+    end
+
+    -- Create a new panel for the buttons.
+    local panelPos = obj.positionToWorld({
+        x = 0,
+        y = 0.1,
+        z = 1.15
+    })
+    Debug.logTable('pos', obj.getPosition())
+    Debug.logTable('panelPos', panelPos)
+    local panel = spawnObject({
+        type = 'Card',
+        --position = panelPos,
+        scale = {
+            x = 9.28,
+            y = 1,
+            z = 0.7
+        },
+        rotation = obj.getRotation(),
+        snap_to_grid = false,
+        sound = false,
+    })
+    panel.use_grid = false
+    panel.use_snap_points = false
+    panel.use_gravity = false
+    panel.interactable = false
+    panel.setPosition(panelPos)
+    panel.setLock(true)
+
+    local buttonContainer = panel
+    local fontSize = 300
+    local width = 2800
+    local height = 600
+    local x0 = -0.7
+    local dx = 0.7
+    local y = 0.5
+    local z0 = 0
+    local dz = 0
+
+    local invScale = buttonContainer.getScale()
+    local buttonScale = { x = 1.0 / invScale.x, y = 1.0 / invScale.y, z = 1.0 / invScale.z }
+
+    -- Note: the function_owner is used to locate the function, and must be
+    -- "self".  When the function gets called, the first parameter "obj"
+    -- will be the object the button is connected to via createButton, in
+    -- this case the associated MultiRoller.
+
+    buttonContainer.createButton({
+        click_function = 'onClickAutoFillPds',
+        function_owner = self,
+        label = 'AUTO-FILL PDS',
+        font_size = fontSize,
+        width = width,
+        height = height,
+        position = { x = x0 + dx * 0, y = y, z = z0 + dz * 0 },
+        scale = buttonScale,
+    })
+    buttonContainer.createButton({
+        click_function = 'onClickAutoFillShip',
+        function_owner = self,
+        label = 'AUTO-FILL SHIPS',
+        font_size = fontSize,
+        width = width,
+        height = height,
+        position = { x = x0 + dx * 1, y = y, z = z0 + dz * 1 },
+        scale = buttonScale,
+    })
+    buttonContainer.createButton({
+        click_function = 'onClickAutoFillGround',
+        function_owner = self,
+        label = 'AUTO-FILL GROUND',
+        font_size = fontSize,
+        width = width,
+        height = height,
+        position = { x = x0 + dx * 2, y = y, z = z0 + dz * 2 },
+        scale = buttonScale,
+    })
+
+    return true
+end
+
+function removeAutoFillButtonsFromMultiRoller(obj)
+    local autoFillButtons = getAutoFillButtons(obj)
+    if not autoFillButtons then
+        -- Do not have buttons.
+        return false
+    end
+
+    for _, button in ipairs(autoFillButtons) do
+        obj.removeButton(button.index)
+    end
+
+    return true
+end
+
+function addAutoFillButtonsToMultiRollers()
     local count = 0
     for _, obj in ipairs(getAllObjects()) do
         local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
         if startPos == 1 then
-            if not getAutoFillButton(obj) then
-                --print('adding button to ' .. obj.getName())
-                obj.createButton({
-                    click_function = 'getValuesAndfillMultiRoller',
-                    function_owner = self,
-                    label = 'AUTO-FILL\nMULTIROLLER',
-                    font_size = 40,
-                    width = 300,
-                    height = 50,
-                    position = { x = 0.7, y = 0.2, z = 0 },
-                })
+            if addAutoFillButtonsToMultiRoller(obj) then
                 count = count + 1
             end
         end
@@ -1047,15 +1216,12 @@ function addAutoFillButtonsToMultiRollers(obj, playerClickColor, altClick)
     print('added auto-fill buttons to ' .. count .. ' MultiRollers')
 end
 
-function removeAutoFillButtonsFromMultiRollers(obj, playerClickColor, altClick)
+function removeAutoFillButtonsFromMultiRollers()
     local count = 0
     for _, obj in ipairs(getAllObjects()) do
         local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
         if startPos == 1 then
-            local button = getAutoFillButton(obj)
-            if button then
-                --print('removing button from ' .. obj.getName())
-                obj.removeButton(button.index)
+            if removeAutoFillButtonsFromMultiRoller(obj) then
                 count = count + 1
             end
         end
@@ -1067,6 +1233,7 @@ end
 
 function onLoad(save_state)
     print('onLoad')
+    addAutoFillButtonsToMultiRollers()
 
     -- Scale the block and attach a button with reversed scale.
     local scale = { x = 3, y = 0.1, z = 1 }
