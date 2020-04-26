@@ -16,7 +16,7 @@ action (e.g. Space Cannon vs Bombardment).
 PDS2 targets adjacent and through-wormhole, including the Creuss flagship's
 mobile delta wormhole.  The Winnu flagship sets its count to the number of
 non-fighter opponents.  The Xxcha flagship has an adjacent-reaching PDS.
-
+pp
 Creuss players might want to enable "grid" on their homeworld so it aligns well
 with the table grid, making sure units on the planet are counted.
 
@@ -52,6 +52,9 @@ local data = {
 
     -- The last position where the active player dropped a command token.
     lastActivatedPosition = nil,
+
+    -- Map from auto-fill panel objects to the associated MutliRoller.
+    autoFillPanelToMultiRoller = {},
 
     -- Is the current action done via alt(right)-clicking on a button?
     altClick = false,
@@ -963,7 +966,7 @@ function getCombatSheetValues(sheetPosition, activatedHexPosition, wantList)
     if resultCards['PDS II'] and myNeighborUnits['PDS'] then
         local count = #myNeighborUnits['PDS']
         Debug.printToAll('PDS2 with ' .. count .. ' adjacent PDS', selfColor)
-        resultUnits['PDS'] = (result['PDS'] or 0) + count
+        resultUnits['PDS'] = (resultUnits['PDS'] or 0) + count
     end
 
     local myLocalFlagships = myLocalUnits['Flagship'] or {}
@@ -971,12 +974,21 @@ function getCombatSheetValues(sheetPosition, activatedHexPosition, wantList)
     local myFlagshipsIncludeNeighbors = Util.joinLists(myLocalFlagships, myNeighborFlagships)
 
     -- The Xxcha flagship has Space Combat that can shoot adjacent systems.
-    for _, obj in ipairs(myFlagshipsIncludeNeighbors) do
-        local name = obj.getName()
-        local flagship = data.flagships[name]
-        if flagship and flagship.spaceCannon then
-            Debug.printToAll(name .. ' has space cannon', selfColor)
-            resultUnits['Flagship'] = (resultUnits['Flagship'] or 0) + 1
+    -- Do not include this if there is a wantList that does not include PDS!
+    local wantPds = not wantList
+    for _, want in ipairs(wantList or {}) do
+        if want == 'pds' then
+            wantPds = true
+        end
+    end
+    if wantPds and not resultUnits['Flagship'] then
+        for _, obj in ipairs(myFlagshipsIncludeNeighbors) do
+            local name = obj.getName()
+            local flagship = data.flagships[name]
+            if flagship and flagship.spaceCannon then
+                Debug.printToAll(name .. ' has space cannon', selfColor)
+                resultUnits['Flagship'] = (resultUnits['Flagship'] or 0) + 1
+            end
         end
     end
 
@@ -1043,13 +1055,13 @@ function fillMultiRoller(multiRoller, selfColor, units, cards)
     -- Click the "update button" by calling the associated downstream function.
     -- Technically calling "shipPlus" above also does this, but do it again in
     -- case that changes in the future.
-    Debug.log('MultiRoller.detectCards')
+    Debug.log('MultiRoller.detectCards ' .. tostring(selfColor or 'none'))
     multiRoller.call('detectCards', selfColor)
 end
 
 -------------------------------------------------------------------------------
 
-function autoFill(multiRoller, altClick, wantList)
+function autoFill(autoFillPanel, altClick, wantList)
     local pos = data.lastActivatedPosition
     if not pos then
         print(self.getName() .. ': no activated system, aborting')
@@ -1063,6 +1075,7 @@ function autoFill(multiRoller, altClick, wantList)
     pos = TI4Hex.position(TI4Hex.hex(pos))
 
     -- Get the values.
+    local multiRoller = data.autoFillPanelToMultiRoller[autoFillPanel]
     local sheetPosition = multiRoller.getPosition()
     local color, units, cards = getCombatSheetValues(sheetPosition, pos, wantList)
 
@@ -1076,41 +1089,23 @@ function autoFill(multiRoller, altClick, wantList)
     data.altClick = false
 end
 
-function onClickAutoFillPds(multiRoller, playerClickColor, altClick)
-    autoFill(multiRoller, altClick, {'pds'})
+function onClickAutoFillPds(autoFillPanel, playerClickColor, altClick)
+    autoFill(autoFillPanel, altClick, {'pds'})
 end
 
-function onClickAutoFillShip(multiRoller, playerClickColor, altClick)
-    autoFill(multiRoller, altClick, {'ship'})
+function onClickAutoFillShip(autoFillPanel, playerClickColor, altClick)
+    autoFill(autoFillPanel, altClick, {'ship'})
 end
 
-function onClickAutoFillGround(multiRoller, playerClickColor, altClick)
-    autoFill(multiRoller, altClick, {'ground'})
+function onClickAutoFillGround(autoFillPanel, playerClickColor, altClick)
+    autoFill(autoFillPanel, altClick, {'ground'})
 end
 
 -------------------------------------------------------------------------------
 
-function getAutoFillButtons(obj)
-    local result = {}
-    local buttons = obj.getButtons()
-    for _, button in ipairs(buttons) do
-        -- Hyphen is a special character, use '%-' to find one.
-        local startPos, endPos = string.find(button.label, 'AUTO%-FILL')
-        if startPos == 1 then
-            table.insert(result, button)
-        end
-    end
-    return (#result > 0 and result) or nil
-end
-
-function addAutoFillButtonsToMultiRoller(obj)
-    local autoFillButtons = getAutoFillButtons(obj)
-    if autoFillButtons then
-        -- Already have buttons.
-        return false
-    end
-
+function spawnAutoFillPanelForMultiRoller(obj)
     -- Create a new panel for the buttons.
+    -- Position takes into account the roller orientation.
     local panelPos = obj.positionToWorld({
         x = 0,
         y = 0.1,
@@ -1130,6 +1125,7 @@ function addAutoFillButtonsToMultiRoller(obj)
         snap_to_grid = false,
         sound = false,
     })
+    panel.setName(self.getName() .. ' Panel')
     panel.use_grid = false
     panel.use_snap_points = false
     panel.use_gravity = false
@@ -1137,7 +1133,9 @@ function addAutoFillButtonsToMultiRoller(obj)
     panel.setPosition(panelPos)
     panel.setLock(true)
 
-    local buttonContainer = panel
+    -- Connect this panel to the MultiRoller.
+    data.autoFillPanelToMultiRoller[panel] = obj
+
     local fontSize = 300
     local width = 2800
     local height = 600
@@ -1147,15 +1145,14 @@ function addAutoFillButtonsToMultiRoller(obj)
     local z0 = 0
     local dz = 0
 
-    local invScale = buttonContainer.getScale()
+    local invScale = panel.getScale()
     local buttonScale = { x = 1.0 / invScale.x, y = 1.0 / invScale.y, z = 1.0 / invScale.z }
 
     -- Note: the function_owner is used to locate the function, and must be
     -- "self".  When the function gets called, the first parameter "obj"
-    -- will be the object the button is connected to via createButton, in
-    -- this case the associated MultiRoller.
+    -- will be the object the button is connected to via createButton.
 
-    buttonContainer.createButton({
+    panel.createButton({
         click_function = 'onClickAutoFillPds',
         function_owner = self,
         label = 'AUTO-FILL PDS',
@@ -1165,7 +1162,7 @@ function addAutoFillButtonsToMultiRoller(obj)
         position = { x = x0 + dx * 0, y = y, z = z0 + dz * 0 },
         scale = buttonScale,
     })
-    buttonContainer.createButton({
+    panel.createButton({
         click_function = 'onClickAutoFillShip',
         function_owner = self,
         label = 'AUTO-FILL SHIPS',
@@ -1175,7 +1172,7 @@ function addAutoFillButtonsToMultiRoller(obj)
         position = { x = x0 + dx * 1, y = y, z = z0 + dz * 1 },
         scale = buttonScale,
     })
-    buttonContainer.createButton({
+    panel.createButton({
         click_function = 'onClickAutoFillGround',
         function_owner = self,
         label = 'AUTO-FILL GROUND',
@@ -1185,46 +1182,48 @@ function addAutoFillButtonsToMultiRoller(obj)
         position = { x = x0 + dx * 2, y = y, z = z0 + dz * 2 },
         scale = buttonScale,
     })
-
-    return true
 end
 
-function removeAutoFillButtonsFromMultiRoller(obj)
-    local autoFillButtons = getAutoFillButtons(obj)
-    if not autoFillButtons then
-        -- Do not have buttons.
-        return false
+function getAutoFillPanels()
+    local result = {}
+    local name = self.getName() .. ' Panel'
+    for _, obj in ipairs(getAllObjects()) do
+        if obj.getName() == name then
+            table.insert(result, obj)
+        end
     end
-
-    for _, button in ipairs(autoFillButtons) do
-        obj.removeButton(button.index)
-    end
-
-    return true
+    return (#result > 0 and result) or nil
 end
 
 function addAutoFillButtonsToMultiRollers()
+    local existing = getAutoFillPanels()
+    if existing then
+        print('already have auto-fill buttons')
+        return
+    end
     local count = 0
     for _, obj in ipairs(getAllObjects()) do
         local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
         if startPos == 1 then
-            if addAutoFillButtonsToMultiRoller(obj) then
-                count = count + 1
-            end
+            spawnAutoFillPanelForMultiRoller(obj)
+            count = count + 1
         end
     end
     print('added auto-fill buttons to ' .. count .. ' MultiRollers')
 end
 
 function removeAutoFillButtonsFromMultiRollers()
-    local count = 0
-    for _, obj in ipairs(getAllObjects()) do
-        local startPos, endPos = string.find(obj.getName(), 'TI4 MultiRoller')
-        if startPos == 1 then
-            if removeAutoFillButtonsFromMultiRoller(obj) then
-                count = count + 1
-            end
-        end
+    local existing = getAutoFillPanels()
+    if not existing then
+        print('no auto-fill buttons to remove')
+        return
+    end
+
+    data.autoFillPanelToMultiRoller = {}
+
+    local count = #existing
+    for _, obj in ipairs(existing) do
+        obj.destruct()
     end
     print('removed auto-fill buttons from ' .. count .. ' MultiRollers')
 end
@@ -1232,9 +1231,6 @@ end
 -------------------------------------------------------------------------------
 
 function onLoad(save_state)
-    print('onLoad')
-    addAutoFillButtonsToMultiRollers()
-
     -- Scale the block and attach a button with reversed scale.
     local scale = { x = 3, y = 0.1, z = 1 }
     local buttonScale = { x = 1.0 / scale.x, y = 1.0 / scale.y, z = 1.0 / scale.z }
