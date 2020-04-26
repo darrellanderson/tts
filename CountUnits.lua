@@ -60,7 +60,6 @@ local data = {
     altClick = false,
 
     -- Unit attributes:
-    -- "ship" boolean is this a ship (vs ground unit).
     units = {
         ['Infantry'] = {},
         ['Fighter'] = { ship = true },
@@ -68,21 +67,16 @@ local data = {
         ['Destroyer'] = { ship = true },
         ['Carrier'] = { ship = true },
         ['Space Dock'] = {},
-        ['PDS'] = {},
-        ['Dreadnought'] = { ship = true },
-        ['War Sun'] = { ship = true },
-        ['Flagship'] = { ship = true },
+        ['PDS'] = { spaceCannon=5, ps='PS9' },
+        ['Dreadnought'] = { ship = true, bombardment=5, ps='PS4' },
+        ['War Sun'] = { ship = true, bombardment=3, ps='PS2' },
+        ['Flagship'] = { ship = true, ps='PS1' },
     },
 
     -- The TTS mode renames flagships to the faction-specific name.
-    -- Flagship attributes:
-    -- "faction" string name.
-    -- "wormhole" string wormhole name.
-    -- "pds2Count" integer number of PDS2 attached.
-    -- "nonFighterDice" boolean set count each to non-fighter opponents.
     flagships = {
         ['Duha Menaimon'] = { faction = 'The Arborec' },
-        ['Arc Secundus'] = { faction = 'The Barony of Letnev' },
+        ['Arc Secundus'] = { faction = 'The Barony of Letnev', bombardment=5, ps='PS1' },
         ['Son of Ragh'] = { faction = 'The Clan of Saar' },
         ['The Inferno'] = { faction = 'The Embers of Muaat' },
         ['Wrath of Kenara'] = { faction = 'The Emirates of Hacan' },
@@ -95,7 +89,7 @@ local data = {
         ["C'morran N'orr"] = { faction = "The Sardakk N'orr" },
         ['J.N.S. Hylarim'] = { faction = 'The Universities of Jol-Nar' },
         ['Salai Sai Corian'] = { faction = 'The Winnu', nonFighterDice = true },
-        ['Loncara Ssodu'] = { faction = 'The Xxcha Kingdom', spaceCannon = true },
+        ['Loncara Ssodu'] = { faction = 'The Xxcha Kingdom', spaceCannon = 5, ps='PS1' },
         ['Van Hauge'] = { faction = 'The Yin Brotherhood' },
         ["Y'sia Y'ssrila"] = { faction = 'The Yssaril Tribes' },
     },
@@ -172,17 +166,12 @@ function Debug.printToAll(message, color)
     local message = self.getName() .. ': ' .. message
     if data.debugPrintToAllEnabled or data.altClick then
         printToAll(message, color)
-    else if data.debugPrintToSelfEnabled then
-        for _, seated in ipairs(getSeatedPlayers()) do
-            if seated == color then
-                printToColor(message, color, color)
-                return
-            end
-        end
+    elseif data.debugPrintToSelfEnabled and Util.isSeatedPlayerColor(color) then
+        printToColor(message, color, color)
+    else
         -- If we get here, there is no player with that color.
         -- Just print to the cliker's console.
-        print(message)
-    end
+        print('[' .. tostring(color or '') .. '] ' .. message)
     end
 end
 
@@ -601,6 +590,15 @@ function Util.findObjectsByName(names)
     return result
 end
 
+function Util.isSeatedPlayerColor(color)
+    for _, seated in ipairs(getSeatedPlayers()) do
+        if seated == color then
+            return true
+        end
+    end
+    return false
+end
+
 --- Does the given player have the card object face up near them?
 -- @param cardObject object.
 -- @param zoneIndex player TI4Zone zone index.
@@ -914,8 +912,13 @@ end
 -- @param sheetPosition {x,y,z} table for multi-roller sheet, used to find player.
 -- @param activatedHexPosition {x,y,z} table for activated system.
 -- @param wantList list of {pds, ship, ground} strings to restrict results.
--- @return table from unit name to quantity, list of relevant cards.
+-- @return table from unit name to quantity, list of relevant cards, suggested plasma scoring button.
 function getCombatSheetValues(sheetPosition, activatedHexPosition, wantList)
+    local wantSet = {}
+    for _, want in ipairs(wantList or {}) do
+        wantSet[want] = true
+    end
+
     local resultUnits = {}
     local resultCards = {}
 
@@ -944,7 +947,7 @@ function getCombatSheetValues(sheetPosition, activatedHexPosition, wantList)
         Debug.printToAll('enemy has Antimass Deflectors', selfColor)
     end
     if resultCards['Plasma Scoring'] then
-        Debug.printToAll(selfColor .. ' has Plasma Scoring, apply it to the appropriate unit for different roll types', selfColor)
+        Debug.printToAll(selfColor .. ' has Plasma Scoring', selfColor)
     end
 
     -- Get own units in system.
@@ -975,12 +978,7 @@ function getCombatSheetValues(sheetPosition, activatedHexPosition, wantList)
 
     -- The Xxcha flagship has Space Combat that can shoot adjacent systems.
     -- Do not include this if there is a wantList that does not include PDS!
-    local wantPds = not wantList
-    for _, want in ipairs(wantList or {}) do
-        if want == 'pds' then
-            wantPds = true
-        end
-    end
+    local wantPds = not wantList or wantSet.pds
     if wantPds and not resultUnits['Flagship'] then
         for _, obj in ipairs(myFlagshipsIncludeNeighbors) do
             local name = obj.getName()
@@ -1010,8 +1008,48 @@ function getCombatSheetValues(sheetPosition, activatedHexPosition, wantList)
         end
     end
 
+    -- If plasma scoring and wantList is pds or ship, suggest which should get it.
+    local suggestedPs = false
+    local suggestedPsUnitName = false
+    if resultCards['Plasma Scoring'] and #wantList == 1 then
+        local candidates = {}
+        for unitName, _ in pairs(myLocalUnits) do
+            candidates[unitName] = data.units[unitName]
+        end
+        local bestCandidate = nil
+        local bestCandidateUnitName = nil
+        if wantSet.pds then
+            if #myFlagshipsIncludeNeighbors > 0 then
+                local unitObject = myFlagshipsIncludeNeighbors[1]
+                candidates['Flagship'] = data.flagships[unitObject.getName()]
+            end
+            for unitName, candidate in pairs(candidates) do
+                if candidate.spaceCannon and (not bestCandidate or candidate.spaceCannon < bestCandidate.spaceCannon) then
+                    bestCandidate = candidate
+                    bestCandidateUnitName = unitName
+                end
+            end
+        end
+        if wantSet.ship then
+            if #myLocalFlagships > 0 then
+                local unitObject = myLocalFlagships[1]
+                candidates['Flagship'] = data.flagships[unitObject.getName()]
+            end
+            for unitName, candidate in pairs(candidates) do
+                if candidate.bombardment and (not bestCandidate or candidate.bombardment < bestCandidate.bombardment) then
+                    bestCandidate = candidate
+                    bestCandidateUnitName = unitName
+                end
+            end
+        end
+        if bestCandidate then
+            suggestedPs = bestCandidate.ps
+            Debug.printToAll('Suggest Plasma Scoring on ' .. bestCandidateUnitName, selfColor)
+        end
+    end
+
     Debug.logTable('resultUnits', resultUnits)
-    return selfColor, resultUnits, resultCards
+    return selfColor, resultUnits, resultCards, suggestedPs
 end
 
 --- Inject values into the multiroller.
@@ -1019,7 +1057,7 @@ end
 -- requires the method names and side effects keep working in future versions
 -- of that independent object.  This would be MUCH better with either a stable
 -- method for injecting values, or by incorporating directly into that object.
-function fillMultiRoller(multiRoller, selfColor, units, cards)
+function fillMultiRoller(multiRoller, selfColor, units, cards, suggestedPS)
     if not multiRoller then
         Debug.log('no MultiRoller')
         return
@@ -1052,6 +1090,11 @@ function fillMultiRoller(multiRoller, selfColor, units, cards)
         multiRoller.call('clickAMD')
     end
 
+    if suggestedPS then
+        Debug.log('MultiRoller.' .. suggestedPS)
+        multiRoller.call(suggestedPS)
+    end
+
     -- Click the "update button" by calling the associated downstream function.
     -- Technically calling "shipPlus" above also does this, but do it again in
     -- case that changes in the future.
@@ -1076,15 +1119,16 @@ function autoFill(autoFillPanel, altClick, wantList)
 
     -- Get the values.
     local multiRoller = data.autoFillPanelToMultiRoller[autoFillPanel]
+    Debug.log('multiRoller=' .. tostring(multiRoller or 'none'))
     local sheetPosition = multiRoller.getPosition()
-    local color, units, cards = getCombatSheetValues(sheetPosition, pos, wantList)
+    local color, units, cards, suggestedPs = getCombatSheetValues(sheetPosition, pos, wantList)
 
     -- If doing print-to-all, also show the ping arrow over the activated hex.
-    if data.altClick then
+    if data.altClick and Util.isSeatedPlayerColor(color) then
         Player[color].pingTable(pos)
     end
 
-    fillMultiRoller(multiRoller, color, units, cards)
+    fillMultiRoller(multiRoller, color, units, cards, suggestedPs)
 
     data.altClick = false
 end
@@ -1111,8 +1155,6 @@ function spawnAutoFillPanelForMultiRoller(obj)
         y = 0.1,
         z = 1.15
     })
-    Debug.logTable('pos', obj.getPosition())
-    Debug.logTable('panelPos', panelPos)
     local panel = spawnObject({
         type = 'Card',
         --position = panelPos,
